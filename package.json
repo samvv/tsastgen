@@ -1,0 +1,31 @@
+{
+  "name": "tsastgen",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generate TypeScript AST definitios from a specification file",
+  "main": "lib/index.js",
+  "bin": {
+    "tsastgen": "lib/cli.js"
+  },
+  "scripts": {
+    "prepare": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samvv/tsastgen.git"
+  },
+  "keywords": [
+    "typescript",
+    "abstract-syntax-tree",
+    "specification-file",
+    "declarative",
+    "code-generator"
+  ],
+  "author": "Sam Vervaeck",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/samvv/tsastgen/issues"
+  },
+  "homepage": "https://github.com/samvv/tsastgen#readme"
+}
