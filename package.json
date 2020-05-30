@@ -27,5 +27,8 @@
   "bugs": {
     "url": "https://github.com/samvv/tsastgen/issues"
   },
-  "homepage": "https://github.com/samvv/tsastgen#readme"
+  "homepage": "https://github.com/samvv/tsastgen#readme",
+  "dependencies": {
+    "typescript": "^3.9.3"
+  }
 }
