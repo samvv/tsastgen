@@ -29,6 +29,10 @@
   },
   "homepage": "https://github.com/samvv/tsastgen#readme",
   "dependencies": {
+    "source-map-support": "^0.5.19",
     "typescript": "^3.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^14.0.6"
   }
 }
