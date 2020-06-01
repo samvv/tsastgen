@@ -1,10 +1,17 @@
 
-import ts from "typescript"
+import ts, { createBinary } from "typescript"
 
 import { map, assert, FastMap, fatal, depthFirstSearch, hasSome, filter } from "./util";
 
 export interface CodeGeneratorOptions {
   rootNodeName?: string;
+}
+
+function isClassSpecificMemberModifier(modifier: ts.Modifier): boolean {
+  return modifier.kind === ts.SyntaxKind.AbstractKeyword
+      || modifier.kind === ts.SyntaxKind.PublicKeyword
+      || modifier.kind === ts.SyntaxKind.ProtectedKeyword
+      || modifier.kind === ts.SyntaxKind.PrivateKeyword
 }
 
 function hasModifier(node: ts.Node, kind: ts.Modifier['kind']): boolean {
@@ -33,6 +40,24 @@ function convertToClassElement(node: ts.ClassElement | ts.TypeElement): ts.Class
     )
   }
   throw new Error(`Support for converting an interface declaration to an abstract class is very limited right now.`)
+}
+
+function buildCond(cases: [ts.Expression, ts.Statement][]): ts.IfStatement {
+  const [test, then] = cases[cases.length-1]
+  let result = ts.createIf(test, then)
+  for (let i = cases.length-1; i >= 0; i++) {
+    const [test, then] = cases[i];
+    result = ts.createIf(test, then, result)
+  }
+  return result;
+}
+
+function buildEquality(left: ts.Expression, right: ts.Expression): ts.Expression {
+  return ts.createBinary(
+    left,
+    ts.SyntaxKind.EqualsEqualsEqualsToken,
+    right
+  )
 }
 
 function buildThrowError(message: string) {
@@ -250,12 +275,65 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
     }
   }
 
-  function *createPublicFieldParameters(node: SpecialDeclaration): IterableIterator<ts.ParameterDeclaration> {
+  function buildPredicateFromTypeNode(type: ts.TypeNode, value: ts.Expression): ts.Expression {
+    if (ts.isArrayTypeNode(type)) {
+      return createBinary(
+        ts.createCall(ts.createIdentifier('isArray'), undefined, [ value ]),
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.createCall(
+          ts.createPropertyAccess(value, 'every'),
+          undefined,
+          [
+            ts.createArrowFunction(
+              undefined,
+              undefined,
+              [ ts.createParameter(undefined, undefined, undefined, 'element'), ts.createParameter(undefined, undefined, undefined, 'i') ],
+              undefined,
+              undefined,
+              buildPredicateFromTypeNode(type.elementType, ts.createElementAccess(value, ts.createIdentifier('i')))
+            )
+          ]
+        )
+      )
+    } else if (ts.isUnionTypeNode(type)) {
+      return buildBinaryExpression(
+        ts.SyntaxKind.BarBarToken,
+        type.types.map(elementType => buildPredicateFromTypeNode(elementType, value))
+      )
+    } else if (ts.isTypeReferenceNode(type)) {
+      if (!ts.isIdentifier(type.typeName)) {
+        throw new Error(`Node is too complex to be processed.`)
+      }
+      const info = declarations.get(type.typeName.getText());
+      if (info === undefined) {
+        throw new Error(`Could not find a declaration for '${type.typeName.getText()}'.`)
+      }
+      return ts.createBinary(value, ts.SyntaxKind.InstanceOfKeyword, type.typeName)
+    } else {
+      switch (type.kind) {
+        case ts.SyntaxKind.NeverKeyword:
+          return ts.createFalse();
+        case ts.SyntaxKind.AnyKeyword:
+          return ts.createTrue();
+        case ts.SyntaxKind.StringKeyword:
+          return buildEquality(value, ts.createStringLiteral('string'));
+        case ts.SyntaxKind.NullKeyword:
+          return buildEquality(value, ts.createNull());
+        case ts.SyntaxKind.BooleanKeyword:
+          return buildEquality(value, ts.createStringLiteral('boolean'));
+        case ts.SyntaxKind.NumberKeyword:
+          return buildEquality(value, ts.createStringLiteral('number'));
+      }
+    }
+    throw new Error(`Could not convert TypeScript type node to a type guard.`)
+  }
+
+  function *buildFieldParameters(node: SpecialDeclaration, modifiers: ts.Modifier[] = []): IterableIterator<ts.ParameterDeclaration> {
     for (const member of getAllMembers(node)) {
       if (ts.isPropertySignature(member)) {
         yield ts.createParameter(
           undefined,
-          [ ts.createToken(ts.SyntaxKind.PublicKeyword) ],
+          modifiers,
           undefined,
           member.name as ts.Identifier,
           undefined,
@@ -449,9 +527,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               buildBinaryExpression(
                 ts.SyntaxKind.BarBarToken,
                 finalNodes.map(node => 
-                  ts.createBinary(
+                  buildEquality(
                     ts.createPropertyAccess(ts.createIdentifier('value'), 'kind'),
-                    ts.SyntaxKind.EqualsEqualsEqualsToken,
                     ts.createPropertyAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier(node.name))
                   )
                 )
@@ -462,6 +539,34 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       )
 
     } else {
+
+      function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement {
+        if (ts.isUnionTypeNode(type) && type.types.find(t => t.kind === ts.SyntaxKind.NullKeyword) !== undefined) {
+          const remainingTypes = type.types.filter(t => t.kind !== ts.SyntaxKind.NullKeyword);
+          assert(remainingTypes.length === 1);
+          return ts.createIf(
+            ts.createBinary(value, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.createNull()),
+            buildChildrenOfStatement(
+              remainingTypes[0],
+              value
+            )
+          )
+        }
+        if (ts.isArrayTypeNode(type)) {
+          return ts.createForOf(
+            undefined,
+            ts.createVariableDeclarationList([
+              ts.createVariableDeclaration('element')
+            ], ts.NodeFlags.Let),
+            value,
+            buildChildrenOfStatement(type.elementType, ts.createIdentifier('element'))
+          )
+        }
+        if (ts.isTypeReferenceNode(type)) {
+          return ts.createExpressionStatement(ts.createYield(value));
+        }
+        throw new Error(`Could not build a guarded yield statement for a certain TypeScript node.`)
+      }
 
       writeNode(
         ts.createClassDeclaration(
@@ -504,7 +609,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               undefined,
               undefined,
               [
-                ...createPublicFieldParameters(info),
+                ...buildFieldParameters(info, [ ts.createToken(ts.SyntaxKind.PublicKeyword) ]),
                 ...rootClassParams,
               ],
               ts.createBlock([
@@ -523,33 +628,12 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               [],
               ts.createTypeReferenceNode(`IterableIterator`, [ ts.createTypeReferenceNode(`${info.name}Child`, undefined) ]),
               ts.createBlock(
-                getAllRelevantMembers(info).map(member => {
-                  if (isNodeArray(member.type!)) {
-                    return ts.createForOf(
-                      undefined,
-                      ts.createVariableDeclarationList([
-                        ts.createVariableDeclaration('element')
-                      ]),
-                      ts.createPropertyAccess(ts.createThis(), member.name as ts.Identifier),
-                      ts.createBlock([
-                        isNullable(getArrayElementType(member.type!)!)
-                          ? ts.createIf(
-                              ts.createBinary(ts.createIdentifier('element'), ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.createNull()),
-                              ts.createExpressionStatement(ts.createYield(ts.createIdentifier('element'))),
-                            )
-                          : ts.createExpressionStatement(ts.createYield(ts.createIdentifier('element')))
-                      ])
-                    )
-                  }
-                  const prop = ts.createPropertyAccess(ts.createThis(), member.name as ts.Identifier);
-                  if (isNullable(member.type!)) {
-                    return ts.createIf(
-                      ts.createBinary(prop, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.createNull()),
-                      ts.createExpressionStatement(ts.createYield(prop)),
-                    )
-                  }
-                  return ts.createExpressionStatement(ts.createYield(prop))
-                })
+                getAllRelevantMembers(info).map(member => 
+                  buildChildrenOfStatement(
+                    member.type!,
+                     ts.createPropertyAccess(ts.createThis(), member.name as ts.Identifier)
+                  )
+                )
               )
             )
           ]
@@ -614,11 +698,17 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   const rootClassParams: ts.ParameterDeclaration[] = [];
   if (rootConstructor !== null){
     for (const param of rootConstructor.parameters) {
-      if (ts.isIdentifier(param.name)) {
-        rootClassParams.push(param)
-      } else {
-        rootClassParams.push(ts.createParameter(undefined, undefined, undefined, generateTemporaryId(), undefined, param.type, param.initializer))
-      }
+      rootClassParams.push(
+        ts.createParameter(
+          undefined,
+          param.modifiers?.filter(p => !isClassSpecificMemberModifier(p)),
+          param.dotDotDotToken,
+          ts.isIdentifier(param.name) ? param.name : generateTemporaryId(),
+          param.questionToken,
+          param.type,
+          param.initializer
+        )
+      )
     }
   }
 
@@ -631,6 +721,35 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
     if (declaration.successors.length === 0) {
       enumMembers.push(ts.createEnumMember(declaration.name))
     }
+  }
+
+  for (const declaration of finalDeclarations) {
+    writeNode(
+      ts.createFunctionDeclaration(
+        undefined,
+        [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+        undefined,
+        `create${declaration.name}`,
+        undefined,
+        [
+          ...buildFieldParameters(declaration),
+          ...rootClassParams,
+        ],
+        ts.createTypeReferenceNode(declaration.name, undefined),
+        ts.createBlock([
+          ts.createReturn(
+            ts.createNew(
+              ts.createIdentifier(declaration.name),
+              undefined,
+              [
+                ...getAllMembers(declaration).map(d => d.name as ts.Identifier),
+                ...rootClassParams.map(p => p.name as ts.Identifier)
+              ]
+            )
+          )
+        ])
+      )
+    )
   }
 
   writeNode(
@@ -648,9 +767,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
             buildBinaryExpression(
               ts.SyntaxKind.AmpersandAmpersandToken,
              [
-              ts.createBinary(
+              buildEquality(
                 ts.createTypeOf(ts.createIdentifier('value')),
-                ts.SyntaxKind.EqualsEqualsEqualsToken,
                 ts.createStringLiteral('object')
               ),
               ts.createBinary(
@@ -706,7 +824,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       ts.createKeywordTypeNode(ts.SyntaxKind.StringKeyword),
       ts.createBlock([
         ts.createIf(
-          ts.createBinary(ts.createElementAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier('kind')), ts.SyntaxKind.EqualsEqualsEqualsToken, ts.createIdentifier('undefined')),
+          buildEquality(ts.createElementAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier('kind')), ts.createIdentifier('undefined')),
           buildThrowError('The SyntaxKind value that was passed in was not found.')
         ),
         ts.createReturn(ts.createElementAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier('kind')))
