@@ -5,7 +5,7 @@ This small utility generates complete definitions for an abstract syntax tree (A
 It uses an ordinary TypeScript file as specification file, and will automatically generate classes, contstructors, union types,
 and predicates based on this specification.
 
-## Usage
+## Basic Usage
 
 First you have to install the package:
 
@@ -57,7 +57,23 @@ Now all you need to do is to run `tsastgen` and make sure it knows what the outp
 tsastgen --root-node=CalcNode --output calc.ts calc-spec.ts
 ```
 
-If `--root-node` is not specified, _tsastgen_ will fall back to searching for a class declaration called `Syntax`.
+## CLI Options
+
+```
+tsast [input-file:output-file..] --root-node=<name> --base-node=<name>
+```
+
+## --base-node
+
+The name of the node to assume to be the base node of all other nodes of the AST.
+
+If `--base-node` is not specified, _tsastgen_ will fall back to searching for a class declaration called `SyntaxBase`.
+
+## --root-node
+
+The name of the node that will be used in your programs to refer to any AST node.
+
+If `--root-node` is not specified, _tsastgen_ will generate a type named `Syntax`.
 
 ## License
 

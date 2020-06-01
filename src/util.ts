@@ -39,6 +39,18 @@ export function hasSome(iterator: Iterator<any>): boolean {
   return !iterator.next().done;
 }
 
+export function *filter<T>(iterator: Iterator<T>, pred: (value: T) => boolean) : IterableIterator<T> {
+   while (true) {
+     const { done, value } = iterator.next();
+     if (done) {
+       break;
+     }
+     if (pred(value)) {
+       yield value;
+     }
+   }
+}
+
 export function *map<T, R>(iterator: Iterator<T>, func: (value: T) => R) : IterableIterator<R> {
    while (true) {
      const { done, value } = iterator.next();

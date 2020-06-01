@@ -1,10 +1,21 @@
 
 import ts from "typescript"
 
-import { map, assert, FastMap, fatal, depthFirstSearch } from "./util";
+import { map, assert, FastMap, fatal, depthFirstSearch, hasSome, filter } from "./util";
 
 export interface CodeGeneratorOptions {
+  baseNodeName?: string;
   rootNodeName?: string;
+}
+
+function buildThrowError(message: string) {
+  return ts.createThrow(
+    ts.createNew(
+      ts.createIdentifier('Error'),
+      undefined,
+      [ ts.createStringLiteral(message) ]
+    )
+  )
 }
 
 function buildBinaryExpression(operator: ts.BinaryOperator, args: ts.Expression[]) {
@@ -58,9 +69,10 @@ type SpecialDeclaration = ClassDeclaration | InterfaceDeclaration | TypeAliasDec
 export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGeneratorOptions): string {
 
   let out = '';
+  const baseNodeName = options?.baseNodeName ?? 'SyntaxBase';
   const rootNodeName = options?.rootNodeName ?? 'Syntax';
   const declarations = new FastMap<string, SpecialDeclaration>();
-  let rootNode: ClassDeclaration | InterfaceDeclaration | null = null;
+  let baseNode: ClassDeclaration | InterfaceDeclaration | null = null;
 
   const printer = ts.createPrinter();
 
@@ -115,6 +127,10 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   }
 
   function getAllRelevantMembers(node: SpecialDeclaration): ts.PropertySignature[] {
+    return getAllMembers(node).filter(member => hasSome(getAllReferencedNodesInTypeNode(member.type!)));
+  }
+
+  function getAllMembers(node: SpecialDeclaration): ts.PropertySignature[] {
 
     const visited = new Set();
 
@@ -137,7 +153,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
         // Whether it be an abstract class or a simple interface, we only care about the property signatures that are public.
         for (const member of currNode.declaration.members) {
-          if (ts.isPropertySignature(member)) {
+          if (ts.isPropertySignature(member) && member.type !== undefined) {
             results.push(member);
           }
         }
@@ -206,7 +222,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   }
 
   function *createPublicFieldParameters(node: SpecialDeclaration): IterableIterator<ts.ParameterDeclaration> {
-    for (const member of getAllRelevantMembers(node)) {
+    for (const member of getAllMembers(node)) {
       if (ts.isPropertySignature(member)) {
         yield ts.createParameter(
           undefined,
@@ -219,6 +235,54 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
         )
       }
     }
+  }
+
+  function hasDirectReferenceToNode(node: ts.TypeNode): boolean {
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && declarations.has(node.typeName.getText())) {
+      return true;
+    }
+    if (ts.isUnionTypeNode(node)) {
+      return node.types.some(node => hasDirectReferenceToNode(node));
+    }
+    // FIXME Type aliases are not resolved.
+    return false;
+  }
+
+  function getArrayElementType(node: ts.TypeNode): ts.TypeNode | null {
+    if (ts.isArrayTypeNode(node) && hasDirectReferenceToNode(node.elementType)) {
+      return node.elementType;
+    }
+    if (ts.isUnionTypeNode(node)) {
+      for (const type of node.types) {
+        if (type !== null) {
+          return type;
+        }
+      }
+    }
+    // FIXME Type aliases are not resolved.
+    return null;
+  }
+
+  function isNullable(node: ts.TypeNode): boolean {
+    if (node.kind === ts.SyntaxKind.NullKeyword) {
+      return true;
+    }
+    if (ts.isUnionTypeNode(node)) {
+      return node.types.some(node => isNullable(node));
+    }
+    // FIXME Type aliases are not resolved.
+    return false;
+  }
+
+  function isNodeArray(node: ts.TypeNode): boolean {
+    if (ts.isArrayTypeNode(node) && hasDirectReferenceToNode(node.elementType)) {
+      return true;
+    }
+    if (ts.isUnionTypeNode(node)) {
+      return node.types.some(node => isNodeArray(node));
+    }
+    // FIXME Type aliases are not resolved.
+    return false;
   }
 
   let nextTempId = 1;
@@ -252,8 +316,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
         declarations.add(name, newInfo);
 
-        if (name === rootNodeName) {
-          rootNode = newInfo as ClassDeclaration | InterfaceDeclaration;
+        if (name === baseNodeName) {
+          baseNode = newInfo as ClassDeclaration | InterfaceDeclaration;
         }
 
       }
@@ -294,7 +358,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
     const info = declarations.get(getNameOfDeclarationAsString(node))!;
 
-    if (info === undefined || info === rootNode) {
+    if (info === undefined || info === baseNode) {
       writeNode(node);
       return;
     }
@@ -309,7 +373,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
         writeNode(
           ts.createTypeAliasDeclaration(
             undefined,
-            undefined,
+            [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
             info.name,
             undefined,
             ts.createUnionTypeNode(finalNodes.map(n => ts.createTypeReferenceNode(n.name, undefined)))
@@ -324,7 +388,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
           undefined,
           `is${info.name}`,
           undefined,
-          [ ts.createParameter(undefined, undefined, undefined, 'value') ],
+          [ ts.createParameter(undefined, undefined, undefined, 'value', undefined, ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)) ],
           ts.createTypePredicateNode('value', ts.createTypeReferenceNode(info.name, undefined)),
           ts.createBlock([
             ts.createReturn(
@@ -357,12 +421,31 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               [
                 ts.createExpressionWithTypeArguments(
                   undefined,
-                  ts.createIdentifier(rootNode!.name)
+                  ts.createIdentifier(baseNode!.name)
                 )
               ]
             )
           ],
           [
+            ts.createProperty(
+              undefined,
+              undefined,
+              `parentNode`,
+              undefined,
+              ts.createUnionTypeNode([ts.createNull(), ts.createTypeReferenceNode(`${info.name}Parent`, undefined)]),
+              ts.createNull(),
+            ),
+            ts.createProperty(
+              undefined,
+              undefined,
+              'kind',
+              undefined,
+              ts.createExpressionWithTypeArguments(
+                undefined,
+                ts.createPropertyAccess(ts.createIdentifier('SyntaxKind'), info.name),
+              ),
+              ts.createPropertyAccess(ts.createIdentifier('SyntaxKind'), info.name),
+            ),
             ts.createConstructor(
               undefined,
               undefined,
@@ -375,6 +458,45 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
                   ts.createCall(ts.createSuper(), undefined, mapParametersToReferences(baseClassParams))
                 )
               ])
+            ),
+            ts.createMethod(
+              undefined,
+              undefined,
+              ts.createToken(ts.SyntaxKind.AsteriskToken),
+              `getChildNodes`,
+              undefined,
+              undefined,
+              [],
+              ts.createTypeReferenceNode(`IterableIterator`, [ ts.createTypeReferenceNode(`${info.name}Child`, undefined) ]),
+              ts.createBlock(
+                getAllRelevantMembers(info).map(member => {
+                  if (isNodeArray(member.type!)) {
+                    return ts.createForOf(
+                      undefined,
+                      ts.createVariableDeclarationList([
+                        ts.createVariableDeclaration('element')
+                      ]),
+                      ts.createPropertyAccess(ts.createThis(), member.name as ts.Identifier),
+                      ts.createBlock([
+                        isNullable(getArrayElementType(member.type!)!)
+                          ? ts.createIf(
+                              ts.createBinary(ts.createIdentifier('element'), ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.createNull()),
+                              ts.createExpressionStatement(ts.createYield(ts.createIdentifier('element'))),
+                            )
+                          : ts.createExpressionStatement(ts.createYield(ts.createIdentifier('element')))
+                      ])
+                    )
+                  }
+                  const prop = ts.createPropertyAccess(ts.createThis(), member.name as ts.Identifier);
+                  if (isNullable(member.type!)) {
+                    return ts.createIf(
+                      ts.createBinary(prop, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.createNull()),
+                      ts.createExpressionStatement(ts.createYield(prop)),
+                    )
+                  }
+                  return ts.createExpressionStatement(ts.createYield(prop))
+                })
+              )
             )
           ]
         )
@@ -421,23 +543,23 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   // Add all top-level interfaces and type aliases to the symbol table.
   scanForSymbols();
 
-  if (rootNode === null) {
-    fatal(`A node named '${rootNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
+  if (baseNode === null) {
+    fatal(`A node named '${baseNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
   }
 
   // Link the symbols to each other.
   linkDeclarations();
 
-  let rootConstructor = null;
-  for (const member of rootNode!.declaration.members) {
+  let baseConstructor = null;
+  for (const member of baseNode!.declaration.members) {
     if (member.kind === ts.SyntaxKind.Constructor) {
-      rootConstructor = member as ts.ConstructorDeclaration;
+      baseConstructor = member as ts.ConstructorDeclaration;
     }
   }
 
   const baseClassParams: ts.ParameterDeclaration[] = [];
-  if (rootConstructor !== null){
-    for (const param of rootConstructor.parameters) {
+  if (baseConstructor !== null){
+    for (const param of baseConstructor.parameters) {
       if (ts.isIdentifier(param.name)) {
         baseClassParams.push(param)
       } else {
@@ -447,6 +569,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   }
 
   ts.forEachChild(sourceFile, transform);
+
+  const finalDeclarations = [...filter(declarations.values(), d => d.successors.length === 0)];
 
   const enumMembers = []
   for (const declaration of declarations.values()) {
@@ -460,13 +584,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       undefined,
       [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
       undefined,
-      `is${rootNode!.name}`,
+      `is${rootNodeName}`,
       undefined,
       [ ts.createParameter(undefined, undefined, undefined, 'value', undefined, ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)) ],
-      ts.createTypePredicateNode('value', ts.createTypeReferenceNode('Syntax', undefined)),
+      ts.createTypePredicateNode('value', ts.createTypeReferenceNode(baseNodeName, undefined)),
       ts.createBlock(
         [
-          ts.createExpressionStatement(
+          ts.createReturn(
             buildBinaryExpression(
               ts.SyntaxKind.AmpersandAmpersandToken,
              [
@@ -483,7 +607,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               ts.createBinary(
                 ts.createIdentifier('value'),
                 ts.SyntaxKind.InstanceOfKeyword,
-                ts.createIdentifier('Syntax')
+                ts.createIdentifier(baseNodeName)
               )
              ] 
             )
@@ -514,6 +638,37 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
           ts.createExpressionStatement(ts.createCall(ts.createPropertyAccess(ts.createThis(), `visit${predecessor.name}`), undefined, [ ts.createIdentifier('node')])))
         )
       ))]
+    )
+  )
+
+  writeNode(
+    ts.createFunctionDeclaration(
+      undefined,
+      [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+      undefined,
+      'kindToString',
+      undefined,
+      [ ts.createParameter(undefined, undefined, undefined, 'kind', undefined, ts.createTypeReferenceNode('SyntaxKind', undefined)) ],
+      ts.createKeywordTypeNode(ts.SyntaxKind.StringKeyword),
+      ts.createBlock([
+        ts.createIf(
+          ts.createBinary(ts.createElementAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier('kind')), ts.SyntaxKind.EqualsEqualsEqualsToken, ts.createIdentifier('undefined')),
+          buildThrowError('The SyntaxKind value that was passed in was not found.')
+        ),
+        ts.createReturn(ts.createElementAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier('kind')))
+      ])
+    )
+  )
+
+  writeNode(
+    ts.createTypeAliasDeclaration(
+      undefined,
+      [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+      rootNodeName,
+      undefined,
+      ts.createUnionTypeNode(
+        finalDeclarations.map(d => ts.createTypeReferenceNode(d.name, undefined))
+      )
     )
   )
 
