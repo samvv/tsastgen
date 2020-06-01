@@ -9,6 +9,14 @@ export interface CodeGeneratorOptions {
   rootNodeName?: string;
 }
 
+function buildBinaryExpression(operator: ts.BinaryOperator, args: ts.Expression[]) {
+  let result = args[0]
+  for (let i = 1; i < args.length; i++) {
+    result = ts.createBinary(result, operator, args[i]);
+  }
+  return result;
+}
+
 function hasFlag(mask: number, flag: number): boolean {
   return (mask & flag) > 0;
 }
@@ -107,6 +115,12 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   function getAllSuccessorsIncludingSelf(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
     return depthFirstSearch(node, 
       node => node.successors as SpecialDeclaration[]);
+  }
+
+  function getAllPredecessors(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
+    return depthFirstSearch(node, 
+      node => node.predecessors as SpecialDeclaration[], 
+      false);
   }
 
   function *getAllNodesHavingNodeInField(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
@@ -331,12 +345,28 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
     const info = declarations.get(getNameOfDeclarationAsString(node))!;
 
-    if (info === undefined) {
+    if (info === undefined || info === rootNode) {
       writeNode(node);
       return;
     }
-
+    
     if (ts.isTypeAliasDeclaration(node) || info.successors.length > 0) {
+
+      const finalNodes = [...mapToFinalNodes([info][Symbol.iterator]())];
+
+      if (ts.isTypeAliasDeclaration(node)) {
+        writeNode(node);
+      } else {
+        writeNode(
+          ts.createTypeAliasDeclaration(
+            undefined,
+            undefined,
+            info.name,
+            undefined,
+            ts.createUnionTypeNode(finalNodes.map(n => ts.createTypeReferenceNode(n.name, undefined)))
+          )
+        )
+      }
 
       writeNode(
         ts.createFunctionDeclaration(
@@ -349,7 +379,17 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
           ts.createTypePredicateNode('value', ts.createTypeReferenceNode(info.name, undefined)),
           ts.createBlock([
             ts.createReturn(
-              ts.createBinary(ts.createIdentifier('value'), ts.SyntaxKind.InstanceOfKeyword, ts.createIdentifier(info.name)))
+              buildBinaryExpression(
+                ts.SyntaxKind.BarBarToken,
+                finalNodes.map(node => 
+                  ts.createBinary(
+                    ts.createPropertyAccess(ts.createIdentifier('value'), 'kind'),
+                    ts.SyntaxKind.EqualsEqualsEqualsToken,
+                    ts.createPropertyAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier(node.name))
+                  )
+                )
+              )
+            )
           ])
         )
       )
@@ -465,6 +505,68 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       enumMembers.push(ts.createEnumMember(declaration.name))
     }
   }
+
+  writeNode(
+    ts.createFunctionDeclaration(
+      undefined,
+      [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+      undefined,
+      `is${rootNode!.name}`,
+      undefined,
+      [ ts.createParameter(undefined, undefined, undefined, 'value', undefined, ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)) ],
+      ts.createTypePredicateNode('value', ts.createTypeReferenceNode('Syntax', undefined)),
+      ts.createBlock(
+        [
+          ts.createExpressionStatement(
+            buildBinaryExpression(
+              ts.SyntaxKind.AmpersandAmpersandToken,
+             [
+              ts.createBinary(
+                ts.createTypeOf(ts.createIdentifier('value')),
+                ts.SyntaxKind.EqualsEqualsEqualsToken,
+                ts.createStringLiteral('object')
+              ),
+              ts.createBinary(
+                ts.createIdentifier('value'),
+                ts.SyntaxKind.ExclamationEqualsEqualsToken,
+                ts.createNull(),
+              ),
+              ts.createBinary(
+                ts.createIdentifier('value'),
+                ts.SyntaxKind.InstanceOfKeyword,
+                ts.createIdentifier('Syntax')
+              )
+             ] 
+            )
+          )
+        ]
+      )
+    )
+  )
+
+  writeNode(
+    ts.createClassDeclaration(
+      undefined,
+      [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+      'Visitor',
+      undefined,
+      undefined,
+      [...map(declarations.values(), declaration => ts.createMethod(
+        undefined,
+        [ ts.createToken(ts.SyntaxKind.ProtectedKeyword) ],
+        undefined,
+        `visit${declaration.name}`,
+        undefined,
+        undefined,
+        [ ts.createParameter(undefined, undefined, undefined, 'node', undefined, ts.createTypeReferenceNode(declaration.name, undefined)) ],
+        ts.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword),
+        ts.createBlock(
+          declaration.predecessors.map(predecessor => 
+          ts.createExpressionStatement(ts.createCall(ts.createPropertyAccess(ts.createThis(), `visit${predecessor.name}`), undefined, [ ts.createIdentifier('node')])))
+        )
+      ))]
+    )
+  )
 
   writeNode(
     ts.createEnumDeclaration(

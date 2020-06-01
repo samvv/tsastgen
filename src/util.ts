@@ -14,7 +14,7 @@ export function fatal(message: string) {
 
 type HasIteratorSymbol<T> = { [Symbol.iterator](): IterableIterator<T> }
 
-export function *depthFirstSearch<T>(value: T, expand: (value: T) => Iterable<T> | HasIteratorSymbol<T>): IterableIterator<T> {
+export function *depthFirstSearch<T>(value: T, expand: (value: T) => Iterable<T> | HasIteratorSymbol<T>, includeSelf = true): IterableIterator<T> {
   const visited = new Set<T>();
   const stack: T[] = [ value ];
   while (stack.length > 0) {
@@ -23,8 +23,13 @@ export function *depthFirstSearch<T>(value: T, expand: (value: T) => Iterable<T>
       continue;
     }
     visited.add(currValue);
-    yield currValue;
+    if (includeSelf) {
+      yield currValue;
+    }
     for (const newValue of expand(currValue)) {
+      if (!includeSelf) {
+        yield newValue;
+      }
       stack.push(newValue);
     }
   }
