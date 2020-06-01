@@ -1,9 +1,10 @@
 AST Generator for TypeScript
 ============================
 
-This small utility generates complete definitions for an abstract syntax tree (AST) in the TypeScript language.
-It uses an ordinary TypeScript file as specification file, and will automatically generate classes, contstructors, union types,
-and predicates based on this specification.
+This small utility generates complete definitions for an abstract syntax tree
+(AST) in the TypeScript language. It read an ordinary TypeScript file as
+a specification file, and will automatically generate classes, contstructors,
+union types, visitors, and predicates based on this specification.
 
 ## Basic Usage
 
