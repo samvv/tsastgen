@@ -1,22 +1,37 @@
 
 import ts from "typescript"
 
-import { DepTree } from "./deptree"
-import { MapLike, error, hasSome, map, assert } from "./util";
+import { error, hasSome, map, assert, MultiMap, FastMap, fatal, depthFirstSearch } from "./util";
+import { BiDGraph } from "./graph";
+import { BitMaskIndex } from "./bitMaskIndex";
 
-export interface ASTGeneratorOptions {
-  isSpecificationFile?(fileName: string): boolean;
-  getOutputPath?(fileName: string): string | null;
+export interface CodeGeneratorOptions {
+  rootNodeName?: string;
 }
 
-type NodeDeclaration = ts.InterfaceDeclaration | ts.TypeAliasDeclaration | ts.ClassDeclaration;
+function hasFlag(mask: number, flag: number): boolean {
+  return (mask & flag) > 0;
+}
 
-function values<T extends object>(obj: T): T[keyof T][] {
-  const result = [];
-  for (const key of Object.keys(obj)) {
-    result.push(obj[key as keyof T]);
-  }
-  return result;
+function hasHeritageClauses(node: ts.Node): node is ts.ClassLikeDeclaration {
+  return (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node))
+      && node.heritageClauses !== undefined;
+}
+
+function isSpecialDeclaration(node: ts.Node): node is ts.ClassLikeDeclaration | ts.InterfaceDeclaration | ts.TypeAliasDeclaration {
+  return (ts.isClassDeclaration(node) && node.name !== undefined)
+      || ts.isInterfaceDeclaration(node)
+      || ts.isTypeAliasDeclaration(node);
+}
+
+function mayIntroduceNewASTNode(node: ts.Node): node is ts.ClassLikeDeclaration | ts.InterfaceDeclaration {
+  return (ts.isClassDeclaration(node) && node.name !== undefined)
+      || ts.isInterfaceDeclaration(node);
+}
+
+function getNameOfDeclarationAsString(node: ts.NamedDeclaration): string {
+  assert(node.name !== undefined)
+  return node.name!.getText();
 }
 
 function isNodeExported(node: ts.Node): boolean {
@@ -26,458 +41,440 @@ function isNodeExported(node: ts.Node): boolean {
   );
 }
 
-function stripSuffix(fileName: string, suffix: string) {
-  if (!fileName.endsWith(suffix)) {
-    return fileName;
-  }
-  return fileName.substring(0, fileName.length-suffix.length);
+enum NodeFlags {
+  IsTrait = 0x1,
+  IsRoot  = 0x2,
+  IsFinal = 0x4,
+  IsAST   = 0x8,
 }
 
-export default function createTransformer(options?: ASTGeneratorOptions): ts.TransformerFactory<ts.SourceFile> {
+interface DeclarationInfo<T extends ts.Node = ts.Node> {
+  name: string;
+  declaration: T;
+  flags: NodeFlags;
+  predecessors: DeclarationInfo[];
+  successors: DeclarationInfo[];
+}
 
-  let isSpecificationFile: (fileName: string) => boolean;
-  let getOutputPath: (fileName: string) => string | null;
+type ClassDeclaration = DeclarationInfo<ts.ClassDeclaration>;
+type InterfaceDeclaration = DeclarationInfo<ts.InterfaceDeclaration>
+type TypeAliasDeclaration = DeclarationInfo<ts.TypeAliasDeclaration>
+type SpecialDeclaration = ClassDeclaration | InterfaceDeclaration | TypeAliasDeclaration;
 
-  if (options?.isSpecificationFile === undefined && options?.getOutputPath === undefined) {
-    isSpecificationFile = fileName => fileName.endsWith('-ast-spec.ts');
-    getOutputPath = fileName => stripSuffix(fileName, '-ast-spec.ts') + '.ts';
-  } else {
-    isSpecificationFile = options?.isSpecificationFile ?? (fileName => false);
-    getOutputPath = options?.getOutputPath ?? (fileName => null);
+export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGeneratorOptions): string {
+
+  let out = '';
+  const rootNodeName = options?.rootNodeName ?? 'Syntax';
+  const declarations = new FastMap<string, SpecialDeclaration>();
+  const symbolFlagIndex = new BitMaskIndex<SpecialDeclaration>();
+  let rootNode: ClassDeclaration | InterfaceDeclaration | null = null;
+
+  const printer = ts.createPrinter();
+
+  function writeNode(node: ts.Node): void {
+    out += printer.printNode(ts.EmitHint.Unspecified, node, sourceFile) + '\n\n'
   }
 
-  function isInsideSpecificationFile(node: ts.Node) {
-    const fileName = node.getSourceFile().fileName;
-    return isSpecificationFile(fileName);
+   function leadsToRootNode(node: SpecialDeclaration): boolean {
+
+     // In order to avoid infinite loops in the case a TypeScript program was malformed, we keep track
+     // of the nodes we visited and will refuse to add nodes that were already visited.
+     const visited = new Set();
+
+     // The initial list of nodes to be verified is simply the nodes that have the same name as the name
+     // that was passed in.
+     const stack: DeclarationInfo[] = [ node ]
+
+     while (stack.length > 0) {
+       const currNode = stack.pop()!;
+       if (currNode === rootNode) {
+         return true;
+       }
+       if (visited.has(currNode)) {
+         continue; 
+       }
+       visited.add(currNode);
+       for (const predecessor of node.predecessors) {
+         stack.push(predecessor)
+       }
+     }
+
+     // We only get here if the list of nodes to visit was empty, which means that no node led to 
+     // the root node.
+     return false;
   }
 
-  function writeTransformedSourceFile(node: ts.SourceFile) {
-    const outputPath = getOutputPath(node.fileName)
-    if (outputPath === null) {
-      return;
-    }
-    const printer = ts.createPrinter();
-    let text;
-    if (ts.isSourceFile(node)) {
-      text = printer.printFile(node);
-    } else {
-      text = printer.printBundle(node);
-    }
-    ts.sys.writeFile(outputPath, text);
+  function getAllSuccessorsIncludingSelf(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
+    return depthFirstSearch(node, 
+      node => node.successors as SpecialDeclaration[]);
   }
-  
-  const transformer: ts.TransformerFactory<ts.SourceFile> = context => {
 
-    let rootNode: ts.ClassDeclaration | null = null;
-    const symbols: MapLike<NodeDeclaration[]> = Object.create(null);
-    const inheritanceTree = new DepTree<string>();
-
-    function indexNodeByName(name: string, node: NodeDeclaration): void {
-        if (name in symbols) {
-          symbols[name].push(node);
-        } else {
-          symbols[name] = [ node ]
-        }
-    }
-
-    function *getAllRegisteredNodes(): IterableIterator<NodeDeclaration> {
-      for (const key of Object.keys(symbols)) {
-        for (const node of symbols[key]) {
-          yield node;
-        }
+  function *getAllNodesHavingNodeInField(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
+    const visited = new Set<SpecialDeclaration>();
+    const stack = [...declarations.values()]
+    outer: while (stack.length > 0) {
+      const declaration = stack.pop()!;
+      if (visited.has(declaration)) {
+        continue;
       }
-    }
-
-    function deleteNode(node: NodeDeclaration): void {
-      const name = getNodeName(node);
-      if (name !== null && symbols[name] !== undefined) {
-        const i = symbols[name].indexOf(node);
-        if (i !== -1) {
-          symbols[name].splice(i, 1);
+      visited.add(declaration);
+      if (ts.isTypeAliasDeclaration(declaration.declaration)) {
+        for (const successor of declaration.successors) {
+          stack.push(successor as SpecialDeclaration);
         }
-      }
-    }
-
-    function leadsToRootNode(nodeName: string): boolean {
-
-      // In order to avoid infinite loops in the case a TypeScript program was malformed, we keep track
-      // of the nodes we visited and will refuse to add nodes that were already visited.
-      const visited = new Set();
-
-      // The initial list of nodes to be verified is simply the nodes that have the same name as the name
-      // that was passed in.
-      const stack = [ nodeName ]
-
-      while (stack.length > 0) {
-        const currNodeName = stack.pop()!;
-        if (currNodeName === rootNode?.name?.getText()) {
-          return true;
-        }
-        if (visited.has(currNodeName)) {
-          continue; 
-        }
-        visited.add(currNodeName);
-        for (const currNode of getNodesNamed(currNodeName)) {
-          if (ts.isInterfaceDeclaration(currNode)) {
-            if (currNode.heritageClauses !== undefined) {
-              for (const heritageClause of currNode.heritageClauses) {
-                for (const type of heritageClause.types) {
-                  if (ts.isIdentifier(type.expression)) {
-                    stack.push(type.expression.getText())
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // We only get here if the list of nodes to visit was empty, which means that no node led to 
-      // the root node.
-      return false;
-    }
-
-    function registerNode(node: NodeDeclaration): void {
-      assert(node.name !== undefined);
-      indexNodeByName(node.name!.getText(), node);
-    }
-
-    function *getAllReferencedNodesInHeritageClause(node: NodeDeclaration): IterableIterator<NodeDeclaration> {
-      if (!ts.isInterfaceDeclaration(node)) {
-        return;
-      }
-      if (node.heritageClauses !== undefined) {
-        for (const heritageClause of node.heritageClauses) {
-          for (const type of heritageClause.types) {
-            if (ts.isIdentifier(type.expression)) {
-              for (const parentNode of getNodesNamed(type.expression.getText())) {
-                yield parentNode;
-              }
-            }
-          }
-        }
-      } 
-    }
-
-    function *getAllFinalNodes(): IterableIterator<ts.InterfaceDeclaration> {
-      for (const node of getAllRegisteredNodes()) {
-        if (isFinalNode(node)) {
-          yield node;
-        }
-      }
-    }
-
-    function *getAllNodesHavingNodeInField(node: NodeDeclaration): IterableIterator<NodeDeclaration> {
-      outer: for (const otherNode of getAllFinalNodes()) {
-        for (const referencedNode of getAllNodesInFieldsOfNode(otherNode)) {
-          // for (const parentNode of getAllReferencedNodesInHeritageClause(referencedNode)) {
-          //   if (parentNode === node) {
-          //     yield otherNode;
-          //     continue outer;
-          //   }
-          // }
-          if (referencedNode === node) {
-            yield otherNode;
-            continue outer;
-          }
-          for (const childNode of getAllNodesInheritingFromNode(referencedNode)) {
-            if (childNode === node) {
-              yield otherNode
+      } else {
+        for (const referencedNode of getAllNodesInFieldsOfNode(declaration)) {
+          for (const predecessor of getAllSuccessorsIncludingSelf(referencedNode)) {
+            if (predecessor === node) {
+              yield declaration;
               continue outer;
             }
           }
         }
       }
     }
+  }
 
-    function *getAllFinalNodesHavingNodeInField(node: NodeDeclaration): IterableIterator<ts.InterfaceDeclaration> {
-      for (const referencedNode of getAllNodesHavingNodeInField(node)) {
-        yield* getFinalNodes(referencedNode);
+  function *getAllReferencedNodesInTypeNode(node: ts.TypeNode): IterableIterator<SpecialDeclaration> {
+    if (ts.isTypeReferenceNode(node)) {
+      if (ts.isIdentifier(node.typeName)) {
+        const referencedNode = declarations.get(node.typeName.getText());
+        if (referencedNode !== undefined) {
+          yield referencedNode;
+        }
+      }
+    } else if (ts.isUnionTypeNode(node)) {
+      for (const elementTypeNode of node.types) {
+        yield* getAllReferencedNodesInTypeNode(elementTypeNode);
       }
     }
+  }
 
-    function getNodeName(node: NodeDeclaration): string {
-      assert(node.name !== undefined);
-      return node.name!.getText();
-    }
+  function getAllRelevantMembers(node: SpecialDeclaration): ts.PropertySignature[] {
 
-    function *getAllNodesInheritingFromNode(node: NodeDeclaration): IterableIterator<ts.Node> {
-      for (const dependantName of inheritanceTree.getAllDependants(getNodeName(node))) {
-        yield* getNodesNamed(dependantName);
+    const visited = new Set();
+
+    // We use a queue and not a stack because we will perform a breadth-first search as opposed to a depth-first search.
+    // Doing this ensures that the members are produces in the order they are inherited.
+    const queue: DeclarationInfo[] = [ node ];
+
+    const results = [];
+
+    while (queue.length > 0) {
+
+      const currNode = queue.shift()!;
+
+      if (visited.has(currNode)) {
+        continue;
       }
-    }
+      visited.add(currNode);
 
-    function *getNodesNamed(name: string): IterableIterator<NodeDeclaration> {
-      if (name in symbols) {
-        yield* symbols[name]; 
-      }
-    }
+      if (mayIntroduceNewASTNode(currNode.declaration)) {
 
-    function *getFinalNodes(node: NodeDeclaration): IterableIterator<ts.InterfaceDeclaration> {
-      if (isFinalNode(node)) {
-        yield node;
-        return;
-      }
-      for (const dependantName of inheritanceTree.getAllDependants(getNodeName(node))) {
-        for (const dependantNode of getNodesNamed(dependantName)) {
-          if (isFinalNode(dependantNode)) {
-            yield dependantNode as ts.InterfaceDeclaration;
+        // Whether it be an abstract class or a simple interface, we only care about the property signatures that are public.
+        for (const member of currNode.declaration.members) {
+          if (ts.isPropertySignature(member)) {
+            results.push(member);
           }
         }
-      }
-    }
 
-    function *getAllReferencedNodesInTypeNode(node: ts.TypeNode): IterableIterator<NodeDeclaration> {
-      if (ts.isTypeReferenceNode(node)) {
-        if (ts.isIdentifier(node.typeName)) {
-          for (const referencedNode of getNodesNamed(node.typeName.getText())) {
-            yield referencedNode;
-          }
+        // We should not forget to scan for fields in one of the declarations this declaration inherited from.
+        for (const predecessor of currNode.predecessors) {
+          queue.push(predecessor);
         }
-      } else if (ts.isUnionTypeNode(node)) {
-        for (const elementTypeNode of node.types) {
-          yield* getAllReferencedNodesInTypeNode(elementTypeNode);
-        }
-      }
-    }
 
-    function *getAllFieldsOfNode(node: NodeDeclaration): IterableIterator<ts.TypeElement> {
-      // FIMXE Gets into an infinite loop when cycles are present
-      if (ts.isInterfaceDeclaration(node)) {
-        yield* node.members;
-        for (const parentNode of getAllReferencedNodesInHeritageClause(node)) {
-          yield* getAllFieldsOfNode(parentNode);
-        }
-      } else if (ts.isTypeAliasDeclaration(node)) {
-        for (const childNode of getAllReferencedNodesInTypeNode(node.type)) {
-          yield* getAllFieldsOfNode(childNode);
-        }
       } else {
-        assert(false);
-      }
-    }
 
-    function *getAllNodesInFieldsOfNode(node: NodeDeclaration): IterableIterator<NodeDeclaration> {
-      if (!ts.isInterfaceDeclaration(node)) {
-        return;
-      }
-      for (const member of getAllFieldsOfNode(node)) {
-        if (ts.isPropertySignature(member) && member.type !== undefined) {
-          for (const node of getAllReferencedNodesInTypeNode(member.type)) {
-            yield node;
-          }
-        }
-      }
-    }
-
-    function *getAllFinalNodesInFieldsOfNode(node: NodeDeclaration): IterableIterator<ts.InterfaceDeclaration> {
-      for (const referencedNode of getAllNodesInFieldsOfNode(node)) {
-        yield* getFinalNodes(referencedNode);
-      }
-    }
-
-    function isFinalNode(node: ts.Node): node is ts.InterfaceDeclaration {
-      return ts.isInterfaceDeclaration(node)  
-        && isNodeExported(node)
-        && !hasSome(getAllNodesInheritingFromNode(node))
-    }
-
-    function *createPublicFieldParameters(node: ts.InterfaceDeclaration): IterableIterator<ts.ParameterDeclaration> {
-      for (const member of getAllFieldsOfNode(node)) {
-        if (ts.isPropertySignature(member)) {
-          yield ts.createParameter(
-            undefined,
-            [ ts.createToken(ts.SyntaxKind.PublicKeyword) ],
-            undefined,
-            member.name as ts.Identifier,
-            undefined,
-            member.type,
-            undefined,
-          )
-        }
-      }
-      // for (const parentNode of getAllReferencedNodesInHeritageClause(node)) {
-      //   yield* createPublicFieldParameters(parentNode);
-      // }
-    }
-
-    let nextTempId = 1;
-
-    function generateTemporaryId(): string {
-      return `__tempid${nextTempId++}`
-    }
-
-    function mapParametersToReferences(params: ts.ParameterDeclaration[]): ts.Identifier[] {
-      return params.map(p => p.name as ts.Identifier);
-    }
-
-    return node => {
-
-      if (!isInsideSpecificationFile(node)) {
-        return node;
-      }
-
-      const prescan: ts.Visitor = node => {
-        if (ts.isClassDeclaration(node)) {
-          rootNode = node;
-          return node; 
-        }
-        if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
-          registerNode(node);
-          return node;
-        }
-        return ts.visitEachChild(node, prescan, context);
-      }
-
-      // Add all top-level interfaces and type aliases to `nodesByName` and set the root node
-      ts.visitNode(node, prescan);
-
-      // Here we are going to clean up the TypeScript nodes that have been added to `nodesByName`.
-      // Some nodes do not actually take part in the AST tree but are only supplementary, so we need to
-      // check this.
-      for (const node of getAllRegisteredNodes()) {
-
-        if (ts.isInterfaceDeclaration(node)) {
-
-          if (node.heritageClauses !== undefined) {
-
-            let hasRootNode = false;
-
-            // Scan the heritage clause for references to nodes that lead to the root node
-            for (const heritageClause of node.heritageClauses) {
-
-              for (const typeNode of heritageClause.types) {
-
-                if (ts.isIdentifier(typeNode.expression)) {
-
-                  const parentNodeName = typeNode.expression.getText();
-
-                  if (!leadsToRootNode(parentNodeName)) {
-                    continue;
-                  }
-
-                  // All good; we are now sure that this node takes part in the AST to be generated.
-                  // We store the relation between the interface and its parent node for future reference.
-                  inheritanceTree.addDependency(parentNodeName, node.name.getText());
-
-                } else {
-
-                  // We only get here if there was a complex expression such as Node<T, K> 
-                  // Instead of terminating the program, it is much friendlier to just show an error message and let the transpilation continue
-                  error(`An inheritance clause of interface ${node.name.getText()} is too complex to be processed. It was skipped.`)
-
-                }
-
-              }
-
-            }
-            
-          }
-
+        // If it is not a class-like declaration, it can only be a type declaration. Most likely,
+        // it is a union of sever other AST node declarations.
+        // It does not make sense to find the nodes that extend this type. Instead, we should look for the
+        // deepest successors in the inheritance tree, which correspond to the union type's final elements (if any).
+        for (const successor of currNode.successors) {
+          queue.push(successor);
         }
 
       }
 
-      const rootConstructor = rootNode!.members.find(member => member.kind === ts.SyntaxKind.Constructor) as ts.ConstructorDeclaration | undefined;
-      const baseClassParams: ts.ParameterDeclaration[] = [];
-      if (rootConstructor !== undefined){
-        for (const param of rootConstructor.parameters) {
-          if (ts.isIdentifier(param.name)) {
-            baseClassParams.push(param)
-          } else {
-            baseClassParams.push(ts.createParameter(undefined, undefined, undefined, generateTemporaryId(), undefined, param.type, param.initializer))
-          }
-        }
-      }
-
-      const transform: ts.Visitor = node => {
-
-        if (node === rootNode) {
-          return [
-            node,
-            ts.createEnumDeclaration(
-              undefined,
-              [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
-              'SyntaxKind',
-              [...map(getAllFinalNodes(), node => ts.createEnumMember(node.name.getText()))]
-            )
-          ]
-        }
-
-        if (isFinalNode(node)) {
-          const intf = node as ts.InterfaceDeclaration;
-          const nodeName = intf.name.getText()
-          return [
-            ts.createClassDeclaration(
-              undefined,
-              [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
-              intf.name.getText(),
-              undefined,
-              [
-                ts.createHeritageClause(
-                  ts.SyntaxKind.ExtendsKeyword,
-                  [
-                    ts.createExpressionWithTypeArguments(
-                      undefined,
-                      ts.createIdentifier(rootNode!.name!.getText())
-                    )
-                  ]
-                )
-              ],
-              [
-                ts.createConstructor(
-                  undefined,
-                  undefined,
-                  [
-                    ...createPublicFieldParameters(intf),
-                    ...baseClassParams,
-                  ],
-                  ts.createBlock([
-                    ts.createExpressionStatement(
-                      ts.createCall(ts.createSuper(), undefined, mapParametersToReferences(baseClassParams))
-                    )
-                  ])
-                )
-              ]
-            ),
-            ts.createTypeAliasDeclaration(
-              undefined,
-              undefined,
-              `${nodeName}Parent`,
-              undefined,
-              ts.createUnionTypeNode(
-                [
-                  ...map(getAllFinalNodesHavingNodeInField(node), node => ts.createTypeReferenceNode(node.name, undefined)),
-                 ts.createTypeReferenceNode('never', undefined)
-                ]
-              )
-            ),
-            ts.createTypeAliasDeclaration(
-              undefined,
-              undefined,
-              `${nodeName}Child`,
-              undefined,
-              ts.createUnionTypeNode(
-                [
-                  ...map(getAllFinalNodesInFieldsOfNode(node), node => ts.createTypeReferenceNode(node.name, undefined)),
-                 ts.createTypeReferenceNode('never', undefined)
-                ]
-              )
-            )
-          ]
-        }
-
-        return ts.visitEachChild(node, transform, context);
-      }
-
-      const transformed = ts.visitNode(node, transform);
-      writeTransformedSourceFile(transformed);
-      return node;
     }
+
+    return results;
+  }
+
+  function *getAllNodesInFieldsOfNode(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
+    for (const member of getAllRelevantMembers(node)) {
+      if (member.type !== undefined) {
+        for (const node of getAllReferencedNodesInTypeNode(member.type)) {
+          yield node;
+        }
+      }
+    }
+  }
+
+  function spread<T>(iterator: Iterator<T>): T[] {
+    const result = []
+    while (true) {
+      const { done, value } = iterator.next();
+      if (done) {
+        break;
+      }
+      result.push(value);
+    }
+    return result;
+  }
+
+  function *mapToFinalNodes(declarations: Iterator<SpecialDeclaration>): IterableIterator<SpecialDeclaration> {
+    const visited = new Set();
+    const stack = spread(declarations);
+    while (stack.length > 0) {
+      const declaration = stack.pop()!;
+      if (visited.has(declaration)) {
+        continue;
+      }
+      visited.add(declaration);
+      if (declaration.successors.length === 0) {
+        yield declaration; 
+      } else {
+        for (const successor of declaration.successors) {
+          stack.push(successor as SpecialDeclaration);
+        }
+      }
+    }
+  }
+
+  function *createPublicFieldParameters(node: SpecialDeclaration): IterableIterator<ts.ParameterDeclaration> {
+    for (const member of getAllRelevantMembers(node)) {
+      if (ts.isPropertySignature(member)) {
+        yield ts.createParameter(
+          undefined,
+          [ ts.createToken(ts.SyntaxKind.PublicKeyword) ],
+          undefined,
+          member.name as ts.Identifier,
+          undefined,
+          member.type,
+          undefined,
+        )
+      }
+    }
+  }
+
+  let nextTempId = 1;
+
+  function generateTemporaryId(): string {
+    return `__tempid${nextTempId++}`
+  }
+
+  function mapParametersToReferences(params: ts.ParameterDeclaration[]): ts.Identifier[] {
+    return params.map(p => p.name as ts.Identifier);
+  }
+
+  function scanForSymbols() {
+
+    ts.forEachChild(sourceFile, node => {
+
+      if (isSpecialDeclaration(node)) {
+
+        const name = getNameOfDeclarationAsString(node);
+
+        if (declarations.has(name)) {
+          fatal(`A symbol named '${name}' was already added. In order to keep things simple, duplicate declarations are not allowed.`)
+        }
+
+        const newInfo = {
+          declaration: node,
+          flags: 0,
+          name,
+          predecessors: [],
+          successors: [],
+        } as SpecialDeclaration;
+
+        declarations.add(name, newInfo);
+
+        if (name === rootNodeName) {
+          rootNode = newInfo as ClassDeclaration | InterfaceDeclaration;
+        }
+
+      }
+
+    });
 
   }
 
-  return transformer;
+  function linkDeclarations() {
+    for (const node of declarations.values()) {
+      if (hasHeritageClauses(node.declaration)) {
+        for (const heritageClause of node.declaration.heritageClauses!) {
+          for (const type of heritageClause.types) {
+            if (ts.isIdentifier(type.expression)) {
+              const otherNode = declarations.get(type.expression.getText());
+              if (otherNode !== undefined) {
+                node.predecessors.push(otherNode);
+                otherNode.successors.push(node);
+              }
+            }
+          }
+        }
+      } else if (ts.isTypeAliasDeclaration(node.declaration)) {
+        for (const otherNode of getAllReferencedNodesInTypeNode(node.declaration.type)) {
+          node.successors.push(otherNode);
+          otherNode.predecessors.push(node);
+        }
+      }
+    } 
+  }
 
+  function transform(node: ts.Node) {
+
+    if (!isSpecialDeclaration(node)) {
+      writeNode(node);
+      return;
+    }
+
+    const info = declarations.get(getNameOfDeclarationAsString(node))!;
+
+    if (info === undefined) {
+      writeNode(node);
+      return;
+    }
+
+    if (ts.isTypeAliasDeclaration(node) || info.successors.length > 0) {
+
+      writeNode(
+        ts.createFunctionDeclaration(
+          undefined,
+          [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+          undefined,
+          `is${info.name}`,
+          undefined,
+          [ ts.createParameter(undefined, undefined, undefined, 'value') ],
+          ts.createTypePredicateNode('value', ts.createTypeReferenceNode(info.name, undefined)),
+          ts.createBlock([
+            ts.createReturn(
+              ts.createBinary(ts.createIdentifier('value'), ts.SyntaxKind.InstanceOfKeyword, ts.createIdentifier(info.name)))
+          ])
+        )
+      )
+
+    } else {
+       
+      writeNode(
+        ts.createClassDeclaration(
+          undefined,
+          [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+          info.name,
+          undefined,
+          [
+            ts.createHeritageClause(
+              ts.SyntaxKind.ExtendsKeyword,
+              [
+                ts.createExpressionWithTypeArguments(
+                  undefined,
+                  ts.createIdentifier(rootNode!.name)
+                )
+              ]
+            )
+          ],
+          [
+            ts.createConstructor(
+              undefined,
+              undefined,
+              [
+                ...createPublicFieldParameters(info),
+                ...baseClassParams,
+              ],
+              ts.createBlock([
+                ts.createExpressionStatement(
+                  ts.createCall(ts.createSuper(), undefined, mapParametersToReferences(baseClassParams))
+                )
+              ])
+            )
+          ]
+        )
+      );
+
+      const parentNodes = mapToFinalNodes(getAllNodesHavingNodeInField(info));
+
+      writeNode(
+        ts.createTypeAliasDeclaration(
+          undefined,
+          undefined,
+          `${info.name}Parent`,
+          undefined,
+          ts.createUnionTypeNode(
+            [
+              ...map(parentNodes, node => ts.createTypeReferenceNode(node.name, undefined)),
+             ts.createKeywordTypeNode(ts.SyntaxKind.NeverKeyword)
+            ]
+          )
+        )
+      );
+
+      const childNodes = mapToFinalNodes(getAllNodesInFieldsOfNode(info));
+
+      writeNode(
+        ts.createTypeAliasDeclaration(
+          undefined,
+          undefined,
+          `${info.name}Child`,
+          undefined,
+          ts.createUnionTypeNode(
+            [
+              ...map(childNodes, node => ts.createTypeReferenceNode(node.name, undefined)),
+             ts.createKeywordTypeNode(ts.SyntaxKind.NeverKeyword)
+            ]
+          )
+        )
+      );
+
+    }
+  
+  }
+
+  // Add all top-level interfaces and type aliases to the symbol table.
+  scanForSymbols();
+
+  if (rootNode === null) {
+    fatal(`A node named '${rootNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
+  }
+
+  // Link the symbols to each other.
+  linkDeclarations();
+
+  let rootConstructor = null;
+  for (const member of rootNode!.declaration.members) {
+    if (member.kind === ts.SyntaxKind.Constructor) {
+      rootConstructor = member as ts.ConstructorDeclaration;
+    }
+  }
+
+  const baseClassParams: ts.ParameterDeclaration[] = [];
+  if (rootConstructor !== null){
+    for (const param of rootConstructor.parameters) {
+      if (ts.isIdentifier(param.name)) {
+        baseClassParams.push(param)
+      } else {
+        baseClassParams.push(ts.createParameter(undefined, undefined, undefined, generateTemporaryId(), undefined, param.type, param.initializer))
+      }
+    }
+  }
+
+  ts.forEachChild(sourceFile, transform);
+
+  const enumMembers = []
+  for (const declaration of declarations.values()) {
+    if (declaration.successors.length === 0) {
+      enumMembers.push(ts.createEnumMember(declaration.name))
+    }
+  }
+
+  writeNode(
+    ts.createEnumDeclaration(
+      undefined,
+      [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+      'SyntaxKind',
+      enumMembers,
+    )
+  )
+
+  return out;
 }
 
