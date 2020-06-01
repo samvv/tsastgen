@@ -1,9 +1,7 @@
 
 import ts from "typescript"
 
-import { error, hasSome, map, assert, MultiMap, FastMap, fatal, depthFirstSearch } from "./util";
-import { BiDGraph } from "./graph";
-import { BitMaskIndex } from "./bitMaskIndex";
+import { map, assert, FastMap, fatal, depthFirstSearch } from "./util";
 
 export interface CodeGeneratorOptions {
   rootNodeName?: string;
@@ -15,10 +13,6 @@ function buildBinaryExpression(operator: ts.BinaryOperator, args: ts.Expression[
     result = ts.createBinary(result, operator, args[i]);
   }
   return result;
-}
-
-function hasFlag(mask: number, flag: number): boolean {
-  return (mask & flag) > 0;
 }
 
 function hasHeritageClauses(node: ts.Node): node is ts.ClassLikeDeclaration {
@@ -49,17 +43,9 @@ function isNodeExported(node: ts.Node): boolean {
   );
 }
 
-enum NodeFlags {
-  IsTrait = 0x1,
-  IsRoot  = 0x2,
-  IsFinal = 0x4,
-  IsAST   = 0x8,
-}
-
 interface DeclarationInfo<T extends ts.Node = ts.Node> {
   name: string;
   declaration: T;
-  flags: NodeFlags;
   predecessors: DeclarationInfo[];
   successors: DeclarationInfo[];
 }
@@ -74,7 +60,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   let out = '';
   const rootNodeName = options?.rootNodeName ?? 'Syntax';
   const declarations = new FastMap<string, SpecialDeclaration>();
-  const symbolFlagIndex = new BitMaskIndex<SpecialDeclaration>();
   let rootNode: ClassDeclaration | InterfaceDeclaration | null = null;
 
   const printer = ts.createPrinter();
@@ -83,44 +68,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
     out += printer.printNode(ts.EmitHint.Unspecified, node, sourceFile) + '\n\n'
   }
 
-   function leadsToRootNode(node: SpecialDeclaration): boolean {
-
-     // In order to avoid infinite loops in the case a TypeScript program was malformed, we keep track
-     // of the nodes we visited and will refuse to add nodes that were already visited.
-     const visited = new Set();
-
-     // The initial list of nodes to be verified is simply the nodes that have the same name as the name
-     // that was passed in.
-     const stack: DeclarationInfo[] = [ node ]
-
-     while (stack.length > 0) {
-       const currNode = stack.pop()!;
-       if (currNode === rootNode) {
-         return true;
-       }
-       if (visited.has(currNode)) {
-         continue; 
-       }
-       visited.add(currNode);
-       for (const predecessor of node.predecessors) {
-         stack.push(predecessor)
-       }
-     }
-
-     // We only get here if the list of nodes to visit was empty, which means that no node led to 
-     // the root node.
-     return false;
-  }
-
   function getAllSuccessorsIncludingSelf(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
     return depthFirstSearch(node, 
       node => node.successors as SpecialDeclaration[]);
-  }
-
-  function getAllPredecessors(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
-    return depthFirstSearch(node, 
-      node => node.predecessors as SpecialDeclaration[], 
-      false);
   }
 
   function *getAllNodesHavingNodeInField(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
@@ -295,7 +245,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
         const newInfo = {
           declaration: node,
-          flags: 0,
           name,
           predecessors: [],
           successors: [],
