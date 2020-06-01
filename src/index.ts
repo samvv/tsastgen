@@ -116,20 +116,20 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
     const visited = new Set<SpecialDeclaration>();
     const stack = [...declarations.values()]
     outer: while (stack.length > 0) {
-      const declaration = stack.pop()!;
-      if (visited.has(declaration)) {
+      const info = stack.pop()!;
+      if (visited.has(info)) {
         continue;
       }
-      visited.add(declaration);
-      if (ts.isTypeAliasDeclaration(declaration.declaration)) {
-        for (const successor of declaration.successors) {
+      visited.add(info);
+      if (info.successors.length > 0) {
+        for (const successor of info.successors) {
           stack.push(successor as SpecialDeclaration);
         }
       } else {
-        for (const referencedNode of getAllNodesInFieldsOfNode(declaration)) {
+        for (const referencedNode of getAllNodesInFieldsOfNode(info)) {
           for (const predecessor of getAllSuccessorsIncludingSelf(referencedNode)) {
             if (predecessor === node) {
-              yield declaration;
+              yield info;
               continue outer;
             }
           }
@@ -150,6 +150,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       for (const elementTypeNode of node.types) {
         yield* getAllReferencedNodesInTypeNode(elementTypeNode);
       }
+    } else if (ts.isArrayTypeNode(node)) {
+      yield* getAllReferencedNodesInTypeNode(node.elementType);
     }
   }
 
