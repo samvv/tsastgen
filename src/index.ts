@@ -21,6 +21,17 @@ function hasModifier(node: ts.Node, kind: ts.Modifier['kind']): boolean {
   return [...node.modifiers].find(m => m.kind === kind) !== undefined;
 }
 
+function buildThisCall(memberName: string, args: (string | ts.Expression)[]): ts.CallExpression {
+  return ts.createCall(
+    ts.createPropertyAccess(
+      ts.createThis(),
+      memberName
+    ),
+    undefined,
+    args.map(arg => typeof(arg) === 'string' ? ts.createIdentifier(arg) : arg),
+  )
+}
+
 function convertToClassElement(node: ts.ClassElement | ts.TypeElement): ts.ClassElement {
   if (ts.isClassElement(node)) {
     return node;
@@ -783,20 +794,67 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       'Visitor',
       undefined,
       undefined,
-      [...map(declarations.values(), declaration => ts.createMethod(
-        undefined,
-        [ ts.createToken(ts.SyntaxKind.ProtectedKeyword) ],
-        undefined,
-        `visit${declaration.name}`,
-        undefined,
-        undefined,
-        [ ts.createParameter(undefined, undefined, undefined, 'node', undefined, ts.createTypeReferenceNode(declaration.name, undefined)) ],
-        ts.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword),
-        ts.createBlock(
-          declaration.predecessors.map(predecessor => 
-          ts.createExpressionStatement(ts.createCall(ts.createPropertyAccess(ts.createThis(), `visit${predecessor.name}`), undefined, [ ts.createIdentifier('node')])))
-        )
-      ))]
+      [
+        ts.createMethod(
+          undefined,
+          undefined,
+          undefined,
+          `visit`,
+          undefined,
+          undefined,
+          [ ts.createParameter(undefined, undefined, undefined, `node`, undefined, ts.createTypeReferenceNode(`Syntax`, undefined)) ],
+          ts.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword),
+          ts.createBlock([
+            ts.createSwitch(
+              ts.createPropertyAccess(ts.createIdentifier('node'), 'kind'),
+              ts.createCaseBlock([
+                ...finalDeclarations.map(fn => 
+                  ts.createCaseClause(
+                    ts.createPropertyAccess(ts.createIdentifier('SyntaxKind'), fn.name),
+                    [
+                      ts.createExpressionStatement(
+                        ts.createCall(
+                          ts.createPropertyAccess(ts.createThis(), `visit${fn.name}`),
+                          undefined,
+                          [ ts.createAsExpression(ts.createIdentifier('node'), ts.createTypeReferenceNode(fn.name, undefined)) ]
+                        )
+                      ),
+                      ts.createBreak(),
+                    ]
+                  )
+                )
+              ])
+            )
+          ])
+        ),
+        ts.createMethod(
+          undefined,
+          [ ts.createToken(ts.SyntaxKind.ProtectedKeyword) ],
+          undefined,
+          `visit${rootNodeName}`,
+          undefined,
+          undefined,
+          [ ts.createParameter(undefined, undefined, undefined, `node`, undefined, ts.createTypeReferenceNode(rootNodeName, undefined)) ],
+          ts.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword),
+          ts.createBlock([])
+        ),
+        ...map(declarations.values(), declaration => ts.createMethod(
+          undefined,
+          [ ts.createToken(ts.SyntaxKind.ProtectedKeyword) ],
+          undefined,
+          `visit${declaration.name}`,
+          undefined,
+          undefined,
+          [ ts.createParameter(undefined, undefined, undefined, 'node', undefined, ts.createTypeReferenceNode(declaration.name, undefined)) ],
+          ts.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword),
+          ts.createBlock(
+            declaration.predecessors.length === 0
+              ? [ ts.createExpressionStatement(buildThisCall(`visit${rootNodeName}`, [ 'node' ])) ]
+              : declaration.predecessors.map(predecessor => 
+                ts.createExpressionStatement(buildThisCall(`visit${predecessor.name}`, [ 'node' ])))
+          )
+        ))
+      ]
     )
   )
 
