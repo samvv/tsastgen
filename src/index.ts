@@ -86,7 +86,7 @@ function hasHeritageClauses(node: ts.Node): node is ts.ClassLikeDeclaration {
 function isSpecialDeclaration(node: ts.Node): node is ts.ClassLikeDeclaration | ts.InterfaceDeclaration | ts.TypeAliasDeclaration {
   return (ts.isClassDeclaration(node) && node.name !== undefined)
       || ts.isInterfaceDeclaration(node)
-      || ts.isTypeAliasDeclaration(node);
+      || (ts.isTypeAliasDeclaration(node) && node.typeParameters === undefined);
 }
 
 function mayIntroduceNewASTNode(node: ts.Node): node is ts.ClassLikeDeclaration | ts.InterfaceDeclaration {
@@ -124,7 +124,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   const declarationsToSkip = [ 'SyntaxKind' ];
   const rootNodeName = options?.rootNodeName ?? 'SyntaxBase';
   const declarations = new FastMap<string, SpecialDeclaration>();
-  let rootNode: ClassDeclaration | InterfaceDeclaration | null = null;
+  let rootNode: ts.ClassDeclaration | ts.InterfaceDeclaration | null = null;
 
   const printer = ts.createPrinter();
 
@@ -406,32 +406,51 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
     ts.forEachChild(sourceFile, node => {
 
-      if (isSpecialDeclaration(node)) {
-
-        const name = getNameOfDeclarationAsString(node);
-
-        if (declarationsToSkip.indexOf(name) !== -1) {
-          return;
-        }
-
-        if (declarations.has(name)) {
-          fatal(`A symbol named '${name}' was already added. In order to keep things simple, duplicate declarations are not allowed.`)
-        }
-
-        const newInfo = {
-          declaration: node,
-          name,
-          predecessors: [],
-          successors: [],
-        } as SpecialDeclaration;
-
-        declarations.add(name, newInfo);
-
-        if (name === rootNodeName) {
-          rootNode = newInfo as ClassDeclaration | InterfaceDeclaration;
-        }
-
+      if (!isSpecialDeclaration(node)) {
+        writeNode(node);
+        return;
       }
+
+      const name = getNameOfDeclarationAsString(node);
+
+      // FIXME This should actually have to be the first statement.
+      if (declarationsToSkip.indexOf(name) !== -1) {
+        return;
+      }
+
+      if (name === rootNodeName) {
+        
+        if (!ts.isInterfaceDeclaration(node) && !ts.isClassDeclaration(node)) {
+          throw new Error(`The root node '${name}' must be a class declaration or an interface declaration.`);
+        }
+
+        writeNode(
+          ts.createClassDeclaration(
+            node.decorators,
+            node.modifiers,
+            `${rootNodeName}Base`,
+            node.typeParameters,
+            node.heritageClauses,
+            [...node.members].map(convertToClassElement),
+          )
+        )
+
+        rootNode = node;
+        return;
+      }
+
+      if (declarations.has(name)) {
+        fatal(`A symbol named '${name}' was already added. In order to keep things simple, duplicate declarations are not allowed.`)
+      }
+
+      const newInfo = {
+        declaration: node,
+        name,
+        predecessors: [],
+        successors: [],
+      } as SpecialDeclaration;
+
+      declarations.add(name, newInfo);
 
     });
 
@@ -460,47 +479,48 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
     } 
   }
 
-  function transform(node: ts.Node) {
 
-    
-    if (!isSpecialDeclaration(node)) {
-      writeNode(node);
-      return;
+  // Add all top-level interfaces and type aliases to the symbol table.
+  scanForSymbols();
+
+  //if (rootNode === null) {
+  //  fatal(`A node named '${rootNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
+  //}
+
+  // Link the symbols to each other.
+  linkDeclarations();
+
+  let rootConstructor = null;
+  for (const member of rootNode!.members) {
+    if (member.kind === ts.SyntaxKind.Constructor) {
+      rootConstructor = member as ts.ConstructorDeclaration;
     }
-
-    const name = getNameOfDeclarationAsString(node);
-
-    if (declarationsToSkip.indexOf(name) !== -1) {
-      return;
-    }
-
-    const info = declarations.get(name)!;
-
-    if (info === undefined) {
-      writeNode(node)
-      return;
-    }
-    
-    if (info === rootNode) {
-      writeNode(
-        ts.createClassDeclaration(
-          info.declaration.decorators,
-          info.declaration.modifiers,
-          `${rootNodeName}Base`,
-          info.declaration.typeParameters,
-          info.declaration.heritageClauses,
-          [...info.declaration.members].map(convertToClassElement),
+  }
+  const rootClassParams: ts.ParameterDeclaration[] = [];
+  if (rootConstructor !== null){
+    for (const param of rootConstructor.parameters) {
+      rootClassParams.push(
+        ts.createParameter(
+          undefined,
+          param.modifiers?.filter(p => !isClassSpecificMemberModifier(p)),
+          param.dotDotDotToken,
+          ts.isIdentifier(param.name) ? param.name : generateTemporaryId(),
+          param.questionToken,
+          param.type,
+          param.initializer
         )
       )
-      return;
     }
+  }
     
-    if (ts.isTypeAliasDeclaration(node) || info.successors.length > 0) {
+  for (const info of declarations.values()) {
+
+    if (info.successors.length > 0) {
 
       const finalNodes = [...mapToFinalNodes([info][Symbol.iterator]())];
 
-      if (ts.isTypeAliasDeclaration(node)) {
-        writeNode(node);
+      if (ts.isTypeAliasDeclaration(info.declaration)) {
+        writeNode(info.declaration);
       } else {
         writeNode(
           ts.createTypeAliasDeclaration(
@@ -512,31 +532,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
           )
         )
       }
-
-      writeNode(
-        ts.createFunctionDeclaration(
-          undefined,
-          [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
-          undefined,
-          `is${info.name}`,
-          undefined,
-          [ ts.createParameter(undefined, undefined, undefined, 'value', undefined, ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)) ],
-          ts.createTypePredicateNode('value', ts.createTypeReferenceNode(info.name, undefined)),
-          ts.createBlock([
-            ts.createReturn(
-              buildBinaryExpression(
-                ts.SyntaxKind.BarBarToken,
-                finalNodes.map(node => 
-                  buildEquality(
-                    ts.createPropertyAccess(ts.createIdentifier('value'), 'kind'),
-                    ts.createPropertyAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier(node.name))
-                  )
-                )
-              )
-            )
-          ])
-        )
-      )
 
     } else {
 
@@ -580,7 +575,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               [
                 ts.createExpressionWithTypeArguments(
                   undefined,
-                  ts.createIdentifier(`${rootNode!.name}Base`)
+                  ts.createIdentifier(`${rootNodeName}Base`)
                 )
               ]
             )
@@ -678,42 +673,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   
   }
 
-  // Add all top-level interfaces and type aliases to the symbol table.
-  scanForSymbols();
-
-  if (rootNode === null) {
-    fatal(`A node named '${rootNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
-  }
-
-  // Link the symbols to each other.
-  linkDeclarations();
-
-  let rootConstructor = null;
-  for (const member of rootNode!.declaration.members) {
-    if (member.kind === ts.SyntaxKind.Constructor) {
-      rootConstructor = member as ts.ConstructorDeclaration;
-    }
-  }
-
-  const rootClassParams: ts.ParameterDeclaration[] = [];
-  if (rootConstructor !== null){
-    for (const param of rootConstructor.parameters) {
-      rootClassParams.push(
-        ts.createParameter(
-          undefined,
-          param.modifiers?.filter(p => !isClassSpecificMemberModifier(p)),
-          param.dotDotDotToken,
-          ts.isIdentifier(param.name) ? param.name : generateTemporaryId(),
-          param.questionToken,
-          param.type,
-          param.initializer
-        )
-      )
-    }
-  }
-
-  ts.forEachChild(sourceFile, transform);
-
   const finalDeclarations = [...filter(declarations.values(), d => d.successors.length === 0)];
 
   const enumMembers = []
@@ -745,6 +704,34 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
                 ...getAllMembers(declaration).map(d => d.name as ts.Identifier),
                 ...rootClassParams.map(p => p.name as ts.Identifier)
               ]
+            )
+          )
+        ])
+      )
+    )
+  }
+    
+  for (const info of declarations.values()) {
+    const finalNodes = [...mapToFinalNodes([info][Symbol.iterator]())];
+    writeNode(
+      ts.createFunctionDeclaration(
+        undefined,
+        [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+        undefined,
+        `is${info.name}`,
+        undefined,
+        [ ts.createParameter(undefined, undefined, undefined, 'value', undefined, ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)) ],
+        ts.createTypePredicateNode('value', ts.createTypeReferenceNode(info.name, undefined)),
+        ts.createBlock([
+          ts.createReturn(
+            buildBinaryExpression(
+              ts.SyntaxKind.BarBarToken,
+              finalNodes.map(node => 
+                buildEquality(
+                  ts.createPropertyAccess(ts.createIdentifier('value'), 'kind'),
+                  ts.createPropertyAccess(ts.createIdentifier('SyntaxKind'), ts.createIdentifier(node.name))
+                )
+              )
             )
           )
         ])
@@ -833,7 +820,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   )
 
   const rootUnionModfiers = [];
-  if (hasModifier(rootNode!.declaration, ts.SyntaxKind.ExportKeyword)) {
+  if (hasModifier(rootNode!, ts.SyntaxKind.ExportKeyword)) {
     rootUnionModfiers.push(ts.createToken(ts.SyntaxKind.ExportKeyword));
   }
 
