@@ -51,6 +51,13 @@ export function *filter<T>(iterator: Iterator<T>, pred: (value: T) => boolean) :
    }
 }
 
+export function toArray<T>(value: T | T[]): T[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  return value === null || value === undefined ? [] : [ value ];
+}
+
 export function *map<T, R>(iterator: Iterator<T>, func: (value: T) => R) : IterableIterator<R> {
    while (true) {
      const { done, value } = iterator.next();

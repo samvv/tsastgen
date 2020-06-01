@@ -4,8 +4,35 @@ import ts from "typescript"
 import { map, assert, FastMap, fatal, depthFirstSearch, hasSome, filter } from "./util";
 
 export interface CodeGeneratorOptions {
-  baseNodeName?: string;
   rootNodeName?: string;
+}
+
+function hasModifier(node: ts.Node, kind: ts.Modifier['kind']): boolean {
+  if (node.modifiers === undefined) {
+    return false;
+  }
+  return [...node.modifiers].find(m => m.kind === kind) !== undefined;
+}
+
+function convertToClassElement(node: ts.ClassElement | ts.TypeElement): ts.ClassElement {
+  if (ts.isClassElement(node)) {
+    return node;
+  }
+  if (ts.isPropertySignature(node)) {
+    const newModifiers = node.modifiers === undefined ? [] : [...node.modifiers];
+    if (hasModifier(node, ts.SyntaxKind.AbstractKeyword)) {
+      newModifiers.push(ts.createToken(ts.SyntaxKind.AbstractKeyword));
+    }
+    return ts.createProperty(
+      node.decorators,
+      newModifiers,
+      node.name,
+      node.questionToken,
+      node.type,
+      undefined,
+    )
+  }
+  throw new Error(`Support for converting an interface declaration to an abstract class is very limited right now.`)
 }
 
 function buildThrowError(message: string) {
@@ -69,10 +96,10 @@ type SpecialDeclaration = ClassDeclaration | InterfaceDeclaration | TypeAliasDec
 export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGeneratorOptions): string {
 
   let out = '';
-  const baseNodeName = options?.baseNodeName ?? 'SyntaxBase';
-  const rootNodeName = options?.rootNodeName ?? 'Syntax';
+  const declarationsToSkip = [ 'SyntaxKind' ];
+  const rootNodeName = options?.rootNodeName ?? 'SyntaxBase';
   const declarations = new FastMap<string, SpecialDeclaration>();
-  let baseNode: ClassDeclaration | InterfaceDeclaration | null = null;
+  let rootNode: ClassDeclaration | InterfaceDeclaration | null = null;
 
   const printer = ts.createPrinter();
 
@@ -303,6 +330,10 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
         const name = getNameOfDeclarationAsString(node);
 
+        if (declarationsToSkip.indexOf(name) !== -1) {
+          return;
+        }
+
         if (declarations.has(name)) {
           fatal(`A symbol named '${name}' was already added. In order to keep things simple, duplicate declarations are not allowed.`)
         }
@@ -316,8 +347,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
         declarations.add(name, newInfo);
 
-        if (name === baseNodeName) {
-          baseNode = newInfo as ClassDeclaration | InterfaceDeclaration;
+        if (name === rootNodeName) {
+          rootNode = newInfo as ClassDeclaration | InterfaceDeclaration;
         }
 
       }
@@ -351,15 +382,36 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
   function transform(node: ts.Node) {
 
+    
     if (!isSpecialDeclaration(node)) {
       writeNode(node);
       return;
     }
 
-    const info = declarations.get(getNameOfDeclarationAsString(node))!;
+    const name = getNameOfDeclarationAsString(node);
 
-    if (info === undefined || info === baseNode) {
-      writeNode(node);
+    if (declarationsToSkip.indexOf(name) !== -1) {
+      return;
+    }
+
+    const info = declarations.get(name)!;
+
+    if (info === undefined) {
+      writeNode(node)
+      return;
+    }
+    
+    if (info === rootNode) {
+      writeNode(
+        ts.createClassDeclaration(
+          info.declaration.decorators,
+          info.declaration.modifiers,
+          `${rootNodeName}Base`,
+          info.declaration.typeParameters,
+          info.declaration.heritageClauses,
+          [...info.declaration.members].map(convertToClassElement),
+        )
+      )
       return;
     }
     
@@ -408,7 +460,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       )
 
     } else {
-       
+
       writeNode(
         ts.createClassDeclaration(
           undefined,
@@ -421,7 +473,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               [
                 ts.createExpressionWithTypeArguments(
                   undefined,
-                  ts.createIdentifier(baseNode!.name)
+                  ts.createIdentifier(`${rootNode!.name}Base`)
                 )
               ]
             )
@@ -451,11 +503,11 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               undefined,
               [
                 ...createPublicFieldParameters(info),
-                ...baseClassParams,
+                ...rootClassParams,
               ],
               ts.createBlock([
                 ts.createExpressionStatement(
-                  ts.createCall(ts.createSuper(), undefined, mapParametersToReferences(baseClassParams))
+                  ts.createCall(ts.createSuper(), undefined, mapParametersToReferences(rootClassParams))
                 )
               ])
             ),
@@ -543,27 +595,27 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   // Add all top-level interfaces and type aliases to the symbol table.
   scanForSymbols();
 
-  if (baseNode === null) {
-    fatal(`A node named '${baseNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
+  if (rootNode === null) {
+    fatal(`A node named '${rootNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
   }
 
   // Link the symbols to each other.
   linkDeclarations();
 
-  let baseConstructor = null;
-  for (const member of baseNode!.declaration.members) {
+  let rootConstructor = null;
+  for (const member of rootNode!.declaration.members) {
     if (member.kind === ts.SyntaxKind.Constructor) {
-      baseConstructor = member as ts.ConstructorDeclaration;
+      rootConstructor = member as ts.ConstructorDeclaration;
     }
   }
 
-  const baseClassParams: ts.ParameterDeclaration[] = [];
-  if (baseConstructor !== null){
-    for (const param of baseConstructor.parameters) {
+  const rootClassParams: ts.ParameterDeclaration[] = [];
+  if (rootConstructor !== null){
+    for (const param of rootConstructor.parameters) {
       if (ts.isIdentifier(param.name)) {
-        baseClassParams.push(param)
+        rootClassParams.push(param)
       } else {
-        baseClassParams.push(ts.createParameter(undefined, undefined, undefined, generateTemporaryId(), undefined, param.type, param.initializer))
+        rootClassParams.push(ts.createParameter(undefined, undefined, undefined, generateTemporaryId(), undefined, param.type, param.initializer))
       }
     }
   }
@@ -587,7 +639,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       `is${rootNodeName}`,
       undefined,
       [ ts.createParameter(undefined, undefined, undefined, 'value', undefined, ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)) ],
-      ts.createTypePredicateNode('value', ts.createTypeReferenceNode(baseNodeName, undefined)),
+      ts.createTypePredicateNode('value', ts.createTypeReferenceNode(rootNodeName, undefined)),
       ts.createBlock(
         [
           ts.createReturn(
@@ -607,7 +659,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
               ts.createBinary(
                 ts.createIdentifier('value'),
                 ts.SyntaxKind.InstanceOfKeyword,
-                ts.createIdentifier(baseNodeName)
+                ts.createIdentifier(`${rootNodeName}Base`)
               )
              ] 
             )
@@ -660,10 +712,15 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
     )
   )
 
+  const rootUnionModfiers = [];
+  if (hasModifier(rootNode!.declaration, ts.SyntaxKind.ExportKeyword)) {
+    rootUnionModfiers.push(ts.createToken(ts.SyntaxKind.ExportKeyword));
+  }
+
   writeNode(
     ts.createTypeAliasDeclaration(
       undefined,
-      [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+      rootUnionModfiers,
       rootNodeName,
       undefined,
       ts.createUnionTypeNode(

@@ -15,7 +15,6 @@ const argv = minimist(process.argv.slice(2));
 const files = argv._;
 
 const rootNodeName = argv['root-node'] ?? 'Syntax'
-const baseNodeName = argv['base-node'] ?? 'SyntaxBase'
 
 for (const file of files) {
   const i = file.indexOf(':');
@@ -28,7 +27,7 @@ for (const file of files) {
     inFile = file.substring(0, i);
   }
   const sourceFile = ts.createSourceFile(inFile, fs.readFileSync(inFile, 'utf8'), ts.ScriptTarget.Latest, true);
-  const generatedCode = generateCode(sourceFile, { baseNodeName, rootNodeName });
+  const generatedCode = generateCode(sourceFile, { rootNodeName });
   if (outFile === null) {
     console.error(generatedCode);
   } else {

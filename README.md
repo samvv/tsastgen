@@ -61,18 +61,13 @@ tsastgen --root-node=CalcNode --output calc.ts calc-spec.ts
 ## CLI Options
 
 ```
-tsast [input-file:output-file..] --root-node=<name> --base-node=<name>
+tsast [input-file:output-file..] --root-node=<name>
 ```
-
-## --base-node
-
-The name of the node to assume to be the base node of all other nodes of the AST.
-
-If `--base-node` is not specified, _tsastgen_ will fall back to searching for a class declaration called `SyntaxBase`.
 
 ## --root-node
 
-The name of the node that will be used in your programs to refer to any AST node.
+The name of the node that serves as the root node of the abstract syntax tree.
+It will automatically be converted to a union type containing all possible AST node types.
 
 If `--root-node` is not specified, _tsastgen_ will generate a type named `Syntax`.
 
