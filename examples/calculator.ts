@@ -1,5 +1,5 @@
 
-class Syntax {
+class CalcBase {
 
   constructor(foo: string) {
 
@@ -7,7 +7,7 @@ class Syntax {
 
 }
 
-interface Expression extends Syntax {}
+interface Expression extends CalcBase {}
 
 interface BinaryExpression {
   left: Expression;
