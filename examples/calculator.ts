@@ -1,5 +1,5 @@
 
-class CalcBase {
+class CalcNode {
 
   constructor(foo: string) {
 
@@ -7,9 +7,14 @@ class CalcBase {
 
 }
 
-interface Expression extends CalcBase {}
+export interface Definition extends CalcNode {
+  name: string;
+  expression: Expression;
+}
 
-interface BinaryExpression {
+export interface Expression extends CalcNode {}
+
+export interface BinaryExpression {
   left: Expression;
   right: Expression;
 }
