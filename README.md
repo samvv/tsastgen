@@ -57,6 +57,8 @@ Now all you need to do is to run `tsastgen` and make sure it knows what the outp
 tsastgen --root-node=CalcNode --output calc.ts calc-spec.ts
 ```
 
+If `--root-node` is not specified, _tsastgen_ will fall back to searching for a class declaration called `Syntax`.
+
 ## License
 
 I chose to license this piece of software under the MIT license, in the hope that you may find it useful.

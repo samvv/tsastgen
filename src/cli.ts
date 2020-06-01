@@ -14,7 +14,7 @@ const argv = minimist(process.argv.slice(2));
 
 const files = argv._;
 
-const rootNodeName = argv['root-node-name'] ?? 'Syntax'
+const rootNodeName = argv['root-node'] ?? 'Syntax'
 
 for (const file of files) {
   const i = file.indexOf(':');
