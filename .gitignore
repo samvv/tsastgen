@@ -1,7 +1,13 @@
 
+# Visual Studio Code IDE
+.vscode/
+
 # npm
 node_modules/
 
 # compiled JavaScript
 lib/
+
+# additional local development files
+Makefile
 
