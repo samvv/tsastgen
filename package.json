@@ -1,7 +1,6 @@
 {
   "name": "tsastgen",
   "version": "1.0.0",
-  "private": true,
   "description": "Generate TypeScript AST definitios from a specification file",
   "main": "lib/index.js",
   "bin": {
