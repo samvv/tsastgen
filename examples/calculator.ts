@@ -7,7 +7,13 @@ class CalcNode {
 
 }
 
-export interface Definition extends CalcNode {
+export interface Sheet {
+  elements: SheetElement[];
+}
+
+export interface SheetElement {};
+
+export interface Definition extends SheetElement, CalcNode {
   name: string;
   expression: Expression;
 }
