@@ -1,0 +1,12 @@
+
+# start by ignoring everything
+*
+
+# add the compiled files
+!/lib/*.js
+!/lib/*.js.map
+!/lib/*.d.ts
+
+# the other files like README.md and LICENSE.txt should be automatically added
+# by NPM, according to their documentation
+
