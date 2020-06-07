@@ -802,7 +802,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
           `visit`,
           undefined,
           undefined,
-          [ ts.createParameter(undefined, undefined, undefined, `node`, undefined, ts.createTypeReferenceNode(`Syntax`, undefined)) ],
+          [ ts.createParameter(undefined, undefined, undefined, `node`, undefined, ts.createTypeReferenceNode(rootNodeName, undefined)) ],
           ts.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword),
           ts.createBlock([
             ts.createSwitch(
