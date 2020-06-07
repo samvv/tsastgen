@@ -4,6 +4,7 @@
 
 # npm
 node_modules/
+tsastgen-*.tgz
 
 # compiled JavaScript
 lib/
