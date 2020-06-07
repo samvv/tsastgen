@@ -8,7 +8,7 @@
   },
   "scripts": {
     "prepare": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsastgen examples/calculator.ts:examples/calculator-generated.ts --root-node=CalcNode && tsc -p examples"
   },
   "repository": {
     "type": "git",
