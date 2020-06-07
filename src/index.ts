@@ -494,9 +494,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
   // Add all top-level interfaces and type aliases to the symbol table.
   scanForSymbols();
 
-  //if (rootNode === null) {
-  //  fatal(`A node named '${rootNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`)
-  //}
+  if (rootNode === null) {
+    throw new Error(`A node named '${rootNodeName}' was not found, while it is required to serve as the root of the AST hierarchy.`);
+  }
 
   // Link the symbols to each other.
   linkDeclarations();
