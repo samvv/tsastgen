@@ -1187,7 +1187,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   write(`
 export function setParents(node: ${rootNodeName}, parentNode: ${rootNodeName} | null = null): void {
-  node.parentNode = parentNode;
+  // We cast to any here because parentNode is strongly typed and not generic
+  // enough to accept arbitrary AST nodes
+  node.parentNode = parentNode as any;
   for (const childNode of node.getChildNodes()) {
     setParents(childNode, node);
   }
