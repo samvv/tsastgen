@@ -1,0 +1,11 @@
+
+# npm
+node_modules/
+
+# generated code
+lib/
+ast.d.ts
+
+# local development files
+Makefile
+
