@@ -22,59 +22,74 @@ Next, create a specification file. Here's an example:
 **calc-spec.ts**
 
 ```ts
-// The root node of our syntax tree. Every AST node should inherit from it, either directly or
-// indirectly.
-export class CalcNode {
-  
-  // You can add as many class members as you like.
-  // They will be automatically transferred to the resulting definitions file.
+// The root node of our syntax tree. Every AST node should inherit from it,
+// either directly or indirectly.
+export class AST {
+
+  // You can add as many class members as you like. They will be automatically
+  // transferred to the resulting definitions file.
   private typeInformation = null;
-  
+
   // If you specify a constructor, the parameters will be automatically appended
   // to the constructor of each derived AST node.
-  constructor(public textOffset?: number) {
-  
+  constructor(public annotation: string | null = null) {
+
   }
-  
+
+  public hasAnnotation(): boolean {
+    return this.annotation !== null;
+  }
+
 }
 
-export interface Definition extends CalcNode {
+export interface Definition extends AST {
   name: string;
   expression: Expression;
 }
 
-export interface Expression extends CalcNode {}
+export interface Expression extends AST {
+  lazyEvaluatedResult?: number;
+}
 
-// This is a 'trait' declaration. It does not inherit from CalcNode,
-// but it does define some fields that every AST node having this trait
-// should implement.
-interface BinaryExpression {
+export interface ConstantExpression extends Expression {
+  value: number;
+}
+
+export interface BinaryExpression extends Expression {
   left: Expression;
   right: Expression;
 }
 
-export interface ConstantExpression {
-  value: number;
+export interface SubtractExpression extends BinaryExpression {
+
 }
 
-export interface SubtractExpression extends BinaryExpression, Expression {}
-export interface AddExpression extends BinaryExpression, Expression {}
-export interface MultiplyExpression extends BinaryExpression, Expression {}
-export interface DivideExpression extends BinaryExpression, Expression {}
+export interface AddExpression extends BinaryExpression {
 
-// Another 'trait' declaration, this time defined as a simple TypeScript union type.
-// tsastgen will automatically generate types and predicates for this trait.
+}
+
+export interface MultiplyExpression extends BinaryExpression {
+
+}
+
+export interface DivideExpression extends BinaryExpression {
+
+}
+
 export type CommutativeExpression 
   = AddExpression
   | SubtractExpression
   | MultiplyExpression;
 ```
 
-Now all you need to do is to run `tsastgen` and make sure it knows what the output file and the root node is.
+Now all you need to do is to run `tsastgen` and make sure it knows what the
+output file and the root node is.
 
 ```
-tsastgen --root-node=CalcNode --output calc.ts calc-spec.ts
+tsastgen --root-node=AST calc.ts:calc-spec.ts
 ```
+
+### How to match certain generated AST nodes
 
 Here's an example of how the generated code might be used:
 
@@ -84,19 +99,20 @@ import { Expression } from "./calc"
 export function calculate(node: Expression): number {
   switch (node.kind) {
     case SyntaxKind.AddExpression:
-       // The fields 'left' and 'right' will now be automatically available, since
-       // AddExpression inherits from BinaryExpression.
        return node.left + node.right;
     case SyntaxKind.SubtractExpression:
-      // ...
+      // and so on ...
     default:
       throw new Error(`I did not know how to process the given node.`);
   }
 }
 ```
 
-In the above example, due to the way in which the code is generated, the compiler automatically knows
-when certain fields are present. The same feature can be seen in the following example:
+In the above example, due to the way in which the code is generated, the
+compiler automatically knows when certain fields are present.
+
+Alternatively, you can use the generated AST predicates combined with an
+if-statement to prevent casting:
 
 ```ts
 const node = generateANewNodeSomehow();
@@ -106,9 +122,19 @@ if (isDefinition(node)) {
 }
 ```
 
+No matter which style you use, you will almost never have to cast to another
+expression.
+
+### How to create new AST nodes
+
 Creating nodes is also very easy:
 
 ```ts
+import {
+  createAddExpression,
+  createConstantExpression,
+} from "./calc";
+
 const n1 = createConstantExpression(1);
 const n2 = createConstantExpression(2);
 const add = createAddExpression(n1, n2);
@@ -116,9 +142,10 @@ const add = createAddExpression(n1, n2);
 console.log(`The result of 1 + 2 is ${calculate(add)}`);
 ```
 
-It is recommended to not use the `new` operator. Instead, use the wrapping `createX` function.
-The motivation is that in the future we might use a more efficient representation than a class,
-using `createX`-functions guarantees forward compatibility.
+It is recommended to not use the `new` operator. Instead, use the wrapping
+`createX` function.  The motivation is that in the future we might use a more
+efficient representation than a class, using `createX`-functions guarantees
+forward compatibility.
 
 ## CLI Options
 
@@ -133,16 +160,20 @@ The specification file that AST definitions will be generated from.
 ### output-file
 
 If present, the file where the transformed `input-file` must be written to.
+If not present, the program will output the result to standard output.
 
 ### --root-node
 
-The name of the node that serves as the root node of the abstract syntax tree.
-It will automatically be converted to a union type containing all possible AST node types.
+The name of the node that serves as the root node of the abstract syntax
+tree.It will automatically be converted to a union type containing all possible
+AST node types.
 
-If `--root-node` is not specified, _tsastgen_ will search for a declaration named `Syntax`.
+If `--root-node` is not specified, _tsastgen_ will search for a declaration
+named `Syntax`.
 
 ## License
 
-I chose to license this piece of software under the MIT license, in the hope that you may find it useful.
-You may freely use this generator in your own projects, but it is always nice if you can give a bit of credit.
+I chose to license this piece of software under the MIT license, in the hope
+that you may find it useful. You may freely use this generator in your own
+projects, but it is always nice if you can give a bit of credit.
 
