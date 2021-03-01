@@ -369,7 +369,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   function *buildFieldParameters(node: SpecialDeclaration, modifiers: ts.Modifier[] = []): IterableIterator<ts.ParameterDeclaration> {
     for (const member of getAllMembers(node)) {
-      if (ts.isPropertySignature(member)) {
+      if (ts.isPropertySignature(member) && member.questionToken === undefined) {
         yield ts.factory.createParameterDeclaration(
           undefined,
           modifiers,
@@ -577,37 +577,74 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
     } else {
 
-      function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement {
-        if (ts.isUnionTypeNode(type) 
-            && type.types.find(t => t.kind === ts.SyntaxKind.NullKeyword) !== undefined) {
+      function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement | null {
+        if (ts.isUnionTypeNode(type)) {
+          const isNullable = type.types.find(t => t.kind === ts.SyntaxKind.NullKeyword) !== undefined;
           const remainingTypes = type.types.filter(t => t.kind !== ts.SyntaxKind.NullKeyword);
-          assert(remainingTypes.length === 1);
-          return ts.factory.createIfStatement(
-            ts.factory.createBinaryExpression(
-              value,
-              ts.SyntaxKind.ExclamationEqualsEqualsToken,
-              ts.factory.createNull()
-            ),
-            buildChildrenOfStatement(
-              remainingTypes[0],
-              value
+          let yieldStatements: ts.Statement[] = [];
+          for (const elementTypeNode of remainingTypes) {
+            const yieldStatement = buildChildrenOfStatement(elementTypeNode, value)
+            if (yieldStatement !== null) {
+              yieldStatements.push(
+                ts.factory.createIfStatement(
+                  buildPredicateFromTypeNode(elementTypeNode, value),
+                  yieldStatement
+                )
+              )
+            }
+          }
+          if (yieldStatements.length === 0) {
+            return null;
+          }
+          let result: ts.Statement = yieldStatements.length === 1
+            ? yieldStatements[0]
+            : ts.factory.createBlock(yieldStatements);
+          if (isNullable) {
+            result = ts.factory.createIfStatement(
+              ts.factory.createBinaryExpression(
+                value,
+                ts.SyntaxKind.ExclamationEqualsEqualsToken,
+                ts.factory.createNull()
+              ),
+              result,
             )
-          )
+          }
+          return result;
         }
-        if (ts.isArrayTypeNode(type)) {
+        if (ts.isTypeReferenceNode(type)
+            && type.typeName.getText() === 'Array'
+            && type.typeArguments !== undefined) {
+          const yieldStatements = buildChildrenOfStatement(type.typeArguments[0], ts.factory.createIdentifier('element'))
+          if (yieldStatements === null) {
+            return null;
+          }
           return ts.factory.createForOfStatement(
             undefined,
             ts.factory.createVariableDeclarationList([
               ts.factory.createVariableDeclaration('element')
             ], ts.NodeFlags.Let),
             value,
-            buildChildrenOfStatement(type.elementType, ts.factory.createIdentifier('element'))
+            yieldStatements,
+          )
+        }
+        if (ts.isArrayTypeNode(type)) {
+          const yieldStatements = buildChildrenOfStatement(type.elementType, ts.factory.createIdentifier('element'));
+          if (yieldStatements === null) {
+            return null;
+          }
+          return ts.factory.createForOfStatement(
+            undefined,
+            ts.factory.createVariableDeclarationList([
+              ts.factory.createVariableDeclaration('element')
+            ], ts.NodeFlags.Let),
+            value,
+            yieldStatements
           )
         }
         if (ts.isTypeReferenceNode(type)) {
           return ts.factory.createExpressionStatement(ts.factory.createYieldExpression(undefined, value));
         }
-        throw new Error(`Could not build a guarded yield statement for a certain TypeScript node.`)
+        return null;
       }
 
       const classMembers = [];
@@ -691,7 +728,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
                   undefined,
                   member.name as ts.Identifier
                 )
-              )
+              )!
             )
           )
         )
@@ -798,7 +835,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
               ts.factory.createIdentifier(declaration.name),
               undefined,
               [
-                ...getAllMembers(declaration).map(d => d.name as ts.Identifier),
+                ...getAllMembers(declaration)
+                  .filter(declaration => declaration.questionToken === undefined)
+                  .map(d => d.name as ts.Identifier),
                 ...rootClassParams.map(p => p.name as ts.Identifier)
               ]
             )
