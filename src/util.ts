@@ -12,9 +12,7 @@ export function fatal(message: string) {
   process.exit(1);
 }
 
-type HasIteratorSymbol<T> = { [Symbol.iterator](): IterableIterator<T> }
-
-export function *depthFirstSearch<T>(value: T, expand: (value: T) => Iterable<T> | HasIteratorSymbol<T>, includeSelf = true): IterableIterator<T> {
+export function *depthFirstSearch<T>(value: T, expand: (value: T) => Iterable<T>, includeSelf = true): IterableIterator<T> {
   const visited = new Set<T>();
   const stack: T[] = [ value ];
   while (stack.length > 0) {
