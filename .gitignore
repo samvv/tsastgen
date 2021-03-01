@@ -6,8 +6,9 @@
 node_modules/
 tsastgen-*.tgz
 
-# compiled JavaScript
+# compiled JavaScript/TypeScript
 lib/
+examples/*-generated.ts
 
 # additional local development files
 Makefile
