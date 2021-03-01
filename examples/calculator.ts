@@ -1,5 +1,5 @@
 
-class CalcNode {
+export class CalcNode {
 
   constructor(foo: string) {
 
