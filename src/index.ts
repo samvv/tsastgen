@@ -185,7 +185,11 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   }
 
   function *getAllReferencedNodesInTypeNode(node: ts.TypeNode): IterableIterator<SpecialDeclaration> {
-    if (ts.isTypeReferenceNode(node)) {
+    if (ts.isTypeReferenceNode(node)
+        && node.typeName.getText() === 'Array'
+        && node.typeArguments !== undefined) {
+      yield * getAllReferencedNodesInTypeNode(node.typeArguments[0]);
+    } else if (ts.isTypeReferenceNode(node)) {
       if (ts.isIdentifier(node.typeName)) {
         const referencedNode = declarations.get(node.typeName.getText());
         if (referencedNode !== undefined) {
@@ -304,40 +308,11 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   function buildPredicateFromTypeNode(type: ts.TypeNode, value: ts.Expression): ts.Expression {
     if (ts.isArrayTypeNode(type)) {
-      return ts.factory.createBinaryExpression(
-        ts.factory.createCallExpression(ts.factory.createIdentifier('isArray'), undefined, [ value ]),
-        ts.SyntaxKind.AmpersandAmpersandToken,
-        ts.factory.createCallExpression(
-          ts.factory.createPropertyAccessExpression(value, 'every'),
-          undefined,
-          [
-            ts.factory.createArrowFunction(
-              undefined,
-              undefined,
-              [
-                ts.factory.createParameterDeclaration(
-                  undefined,
-                  undefined,
-                  undefined,
-                  'element'
-                ),
-                ts.factory.createParameterDeclaration(
-                  undefined,
-                  undefined,
-                  undefined,
-                  'i'
-                )
-              ],
-              undefined,
-              undefined,
-              buildPredicateFromTypeNode(
-                type.elementType,
-                ts.factory.createElementAccessChain(value, undefined, ts.createIdentifier('i'))
-              )
-            )
-          ]
-        )
-      )
+      return ts.factory.createCallExpression(
+        ts.factory.createPropertyAccessExpression(ts.factory.createIdentifier('Array'), 'isArray'),
+        undefined,
+        [ value ]
+      );
     } else if (ts.isUnionTypeNode(type)) {
       return buildBinaryExpression(
         ts.SyntaxKind.BarBarToken,
@@ -351,7 +326,11 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       if (info === undefined) {
         throw new Error(`Could not find a declaration for '${type.typeName.getText()}'.`)
       }
-      return ts.factory.createBinaryExpression(value, ts.SyntaxKind.InstanceOfKeyword, type.typeName)
+      return ts.factory.createCallExpression(
+        ts.factory.createIdentifier(`is${type.typeName.getText()}`),
+        undefined,
+        [ value ]
+      );
     } else {
       switch (type.kind) {
         case ts.SyntaxKind.NeverKeyword:
@@ -388,7 +367,15 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   }
 
   function hasDirectReferenceToNode(node: ts.TypeNode): boolean {
-    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && declarations.has(node.typeName.getText())) {
+    if (ts.isTypeReferenceNode(node)
+        && node.typeName.getText() === 'Array'
+        && node.typeArguments !== undefined
+        && hasDirectReferenceToNode(node.typeArguments[0])) {
+      return true;
+    }
+    if (ts.isTypeReferenceNode(node)
+        && ts.isIdentifier(node.typeName)
+        && declarations.has(node.typeName.getText())) {
       return true;
     }
     if (ts.isUnionTypeNode(node)) {
@@ -583,26 +570,34 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
       function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement | null {
         if (ts.isUnionTypeNode(type)) {
-          const isNullable = type.types.find(t => t.kind === ts.SyntaxKind.NullKeyword) !== undefined;
+          const isNullable = type.types.find(t => ts.isLiteralTypeNode(t) && t.literal.kind === ts.SyntaxKind.NullKeyword) !== undefined;
           const remainingTypes = type.types.filter(t => t.kind !== ts.SyntaxKind.NullKeyword);
-          let yieldStatements: ts.Statement[] = [];
+          const mapped: Array<[ts.TypeNode, ts.Statement]> = [];
           for (const elementTypeNode of remainingTypes) {
-            const yieldStatement = buildChildrenOfStatement(elementTypeNode, value)
+            const yieldStatement = buildChildrenOfStatement(elementTypeNode, value);
             if (yieldStatement !== null) {
-              yieldStatements.push(
-                ts.factory.createIfStatement(
-                  buildPredicateFromTypeNode(elementTypeNode, value),
-                  yieldStatement
-                )
-              )
+              mapped.push([ elementTypeNode, yieldStatement ]);
             }
           }
-          if (yieldStatements.length === 0) {
+          if (mapped.length === 0) {
             return null;
           }
-          let result: ts.Statement = yieldStatements.length === 1
-            ? yieldStatements[0]
-            : ts.factory.createBlock(yieldStatements);
+          if (mapped.length > (isNullable ? 2 : 1)) {
+            for (let i = 0; i < mapped.length; i++) {
+              const [elementTypeNode, yieldStatement] = mapped[i];
+              if (yieldStatement !== null) {
+                mapped[i][1] = (
+                  ts.factory.createIfStatement(
+                    buildPredicateFromTypeNode(elementTypeNode, value),
+                    yieldStatement
+                  )
+                )
+              }
+            }
+          }
+          let result: ts.Statement = mapped.length === 1
+            ? mapped[0][1]
+            : ts.factory.createBlock(mapped.map(pair => pair[1]));
           if (isNullable) {
             result = ts.factory.createIfStatement(
               ts.factory.createBinaryExpression(
