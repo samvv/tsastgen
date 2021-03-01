@@ -145,8 +145,12 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   const printer = ts.createPrinter();
 
+  function write(str: string): void {
+    out += str;
+  }
+
   function writeNode(node: ts.Node): void {
-    out += printer.printNode(ts.EmitHint.Unspecified, node, sourceFile) + '\n\n'
+    write(printer.printNode(ts.EmitHint.Unspecified, node, sourceFile) + '\n\n');
   }
 
   function getAllSuccessorsIncludingSelf(node: SpecialDeclaration): IterableIterator<SpecialDeclaration> {
@@ -706,7 +710,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       )
 
       classMembers.push(
-        // public *getChildNodes(): Iterator<XChild> { ... }
+        // public *getChildNodes(): Iterable<XChild> { ... }
         ts.factory.createMethodDeclaration(
           undefined,
           undefined,
@@ -716,7 +720,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           undefined,
           [],
           ts.factory.createTypeReferenceNode(
-            `Iterator`,
+            `Iterable`,
             [ ts.factory.createTypeReferenceNode(`${info.name}Child`, undefined) ]
           ),
           ts.factory.createBlock(
@@ -1185,6 +1189,15 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       enumMembers,
     )
   )
+
+  write(`
+export function setParents(node: ${rootNodeName}, parentNode: ${rootNodeName} | null = null): void {
+  node.parentNode = parentNode;
+  for (const childNode of node.getChildNodes()) {
+    setParents(childNode, node);
+  }
+}
+`);
 
   return out;
 }
