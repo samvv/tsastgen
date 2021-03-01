@@ -1,5 +1,5 @@
 
-import ts, { createBinary } from "typescript"
+import ts from "typescript"
 
 import { map, assert, FastMap, fatal, depthFirstSearch, hasSome, filter } from "./util";
 
@@ -288,7 +288,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
 
   function buildPredicateFromTypeNode(type: ts.TypeNode, value: ts.Expression): ts.Expression {
     if (ts.isArrayTypeNode(type)) {
-      return createBinary(
+      return ts.createBinary(
         ts.createCall(ts.createIdentifier('isArray'), undefined, [ value ]),
         ts.SyntaxKind.AmpersandAmpersandToken,
         ts.createCall(
@@ -893,6 +893,24 @@ export default function generateCode(sourceFile: ts.SourceFile, options?: CodeGe
       )
     )
   )
+
+  writeNode(
+    ts.createVariableStatement(
+      [ ts.createToken(ts.SyntaxKind.ExportKeyword) ],
+      ts.createVariableDeclarationList(
+        [
+          ts.createVariableDeclaration(
+            'NODE_TYPES',
+            undefined,
+            ts.createObjectLiteral(
+              finalDeclarations.map(n => ts.createShorthandPropertyAssignment(n.name, undefined))
+            )
+          )
+        ],
+        ts.NodeFlags.Const,
+      )
+    )
+  );
 
   writeNode(
     ts.createEnumDeclaration(
