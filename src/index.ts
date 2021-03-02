@@ -352,15 +352,15 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   function *buildFieldParameters(node: SpecialDeclaration, modifiers: ts.Modifier[] = []): IterableIterator<ts.ParameterDeclaration> {
     for (const member of getAllMembers(node)) {
-      if (ts.isPropertySignature(member) && member.questionToken === undefined) {
+      if (ts.isPropertySignature(member)) {
         yield ts.factory.createParameterDeclaration(
           undefined,
           modifiers,
           undefined,
           member.name as ts.Identifier,
-          undefined,
+          member.questionToken,
           member.type,
-          undefined,
+          member.initializer,
         )
       }
     }
