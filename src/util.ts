@@ -160,7 +160,34 @@ export class MultiMap<K extends PropertyKey, V> {
 
 }
 
-export function assert(test: boolean): void {
+export type ArgResolver
+  = string
+  | ((value: any) => string)
+
+export function memoise<F extends (...args: any[]) => any>(fn: F, ...resolvers: ArgResolver[]): F {
+  const cache: MapLike<any> = Object.create(null);
+  const resolve = (arg: any, i: number) => {
+    const resolver = resolvers[i];
+    if (resolver === undefined) {
+      return arg;
+    }
+    if (typeof(resolver) === 'string') {
+      const propertyKey = resolver;
+      return arg[propertyKey];
+    }
+    return resolver(arg);
+  }
+  return function (...args) {
+    const key = args.map(resolve).join(':');
+    if (key in cache) {
+      return cache[key];
+    } else {
+      return cache[key] = fn(...args);
+    }
+  } as F;
+}
+
+export function assert(test: boolean): asserts test {
   if (!test) {
     throw new Error(`Assertion error: an internal invarant failed. This most likely means a bug in tsastgen or an incompatible TypeScript compiler.`)
   }
@@ -178,6 +205,18 @@ export function values<T extends object>(obj: T): T[keyof T][] {
   const result = [];
   for (const key of Object.keys(obj)) {
     result.push(obj[key as keyof T]);
+  }
+  return result;
+}
+
+export function spread<T>(iterator: Iterator<T>): T[] {
+  const result = []
+  while (true) {
+    const { done, value } = iterator.next();
+    if (done) {
+      break;
+    }
+    result.push(value);
   }
   return result;
 }
