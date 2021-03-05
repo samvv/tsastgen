@@ -856,7 +856,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       writeNode(
         ts.factory.createTypeAliasDeclaration(
           undefined,
-          undefined,
+          node.modifiers,
           `${symbol.name}Parent`,
           undefined,
           ts.factory.createUnionTypeNode(
@@ -876,7 +876,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       writeNode(
         ts.factory.createTypeAliasDeclaration(
           undefined,
-          undefined,
+          node.modifiers,
           `${symbol.name}Child`,
           undefined,
           ts.factory.createUnionTypeNode(
