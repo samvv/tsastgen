@@ -1,6 +1,6 @@
 {
   "name": "tsastgen",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Generate TypeScript AST definitios from a specification file",
   "main": "lib/index.js",
   "bin": {
@@ -30,7 +30,7 @@
   "dependencies": {
     "minimist": "^1.2.5",
     "source-map-support": "^0.5.19",
-    "typescript": "^4.2.2"
+    "typescript": "^4.2.3"
   },
   "devDependencies": {
     "@types/minimist": "^1.2.1",
