@@ -1,8 +1,9 @@
 
 import ts from "typescript"
+import { areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, makePublic, removeClassModifiers } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
-import { assert, memoise } from "./util";
+import { assert, implementationLimitation, memoise } from "./util";
 
 export interface CodeGeneratorOptions {
   rootNodeName?: string;
@@ -14,259 +15,6 @@ function first<T1, T2>(tuple: [T1, T2]): T1 {
 
 function second<T1, T2>(tuple: [T1, T2]): T2 {
   return tuple[1];
-}
-
-/**
- * Merges two modifier lists together so that there are no duplicates.
- * 
- * @param a Modifiers to keep when there are duplicates
- * @param b Modifiers to discard when there are duplicates
- */
-export function mergeModifiers(a: ts.Modifier[] | undefined, b: ts.Modifier[] | undefined): ts.Modifier[] {
-  if (a === undefined) {
-    return b ?? [];
-  }
-  if (b === undefined) {
-    return a ?? [];
-  }
-  let result: ts.Modifier[] = [];
-  a.sort((l, r) => l.kind - r.kind);
-  b.sort((l, r) => l.kind - r.kind);
-  let i = 0;
-  let j = 0;
-  for (;;) {
-    const modifierA = a[i];
-    const modifierB = b[i];
-    if (i === a.length) {
-      for (let k = j; k < b.length; k++) {
-        result.push(b[k])
-      }
-      break;
-    }
-    if (j === b.length) {
-      for (let k = i; k < a.length; k++) {
-        result.push(a[k])
-      }
-      break;
-    }
-    if (modifierA.kind > modifierB.kind) {
-      result.push(modifierB);
-      j++;
-    } else if (modifierA.kind < modifierB.kind) {
-      result.push(modifierA);
-      i++;
-    } else {
-      result.push(modifierA);
-      i++;
-      j++;
-    }
-  }
-  return result;
-}
-
-/**
- * Performs a quick search for a node with the given name without relying on
- * something like a symbol table. Useful if you can't create a symbol table or
- * creating a symbol table is too expensive.
- *
- * @param node The node to start searching in
- * @param name The name that the returned node should have
- */
-export function findNodeNamed(node: ts.Node, name: string): ts.Node | null {
-  const toVisit = [ node ];
-  while (toVisit.length > 0) {
-    const currNode = toVisit.pop()!;
-    if ((ts.isClassDeclaration(currNode) || ts.isInterfaceDeclaration(currNode))
-      && currNode.name !== undefined
-      && currNode.name.getText() === name) {
-      return currNode;
-    }
-    if (ts.isSourceFile(currNode)) {
-      for (const statement of currNode.statements) {
-        toVisit.push(statement);
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Search a class or interface for a constructor and returns it if found.
- *
- * @param node The class or interface to search in
- */
-export function findConstructor(
-  node: ts.ClassDeclaration | ts.ClassExpression | ts.InterfaceDeclaration
-): ts.ConstructSignatureDeclaration | ts.ConstructorDeclaration | null {
-  for (const member of node.members) {
-    if (ts.isConstructorDeclaration(member) || ts.isConstructSignatureDeclaration(member)) {
-      return member as ts.ConstructorDeclaration;
-    }
-  }
-  return null;
-}
-
-/**
- * Check whether a given node has a specific modifier.
- */
-export function hasModifier(modifiers: ts.ModifiersArray | undefined, kind: ts.ModifierSyntaxKind): boolean {
-  if (modifiers === undefined) {
-    return false;
-  }
-  return [...modifiers].find(m => m.kind === kind) !== undefined;
-}
-
-function hasClassModifier(modifiers: ts.ModifiersArray | undefined): boolean {
-  if (modifiers === undefined) {
-    return false;
-  }
-  return hasModifier(modifiers, ts.SyntaxKind.PublicKeyword)
-      || hasModifier(modifiers, ts.SyntaxKind.ProtectedKeyword)
-      || hasModifier(modifiers, ts.SyntaxKind.PrivateKeyword)
-}
-
-/**
- * Adds the public class modifier if no class modifier has been specified yet.
- */
-export function makePublic(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
-  if (modifiers === undefined) {
-    return ts.factory.createNodeArray([
-      ts.factory.createModifier(ts.SyntaxKind.PublicKeyword)
-    ]);
-  }
-  if (hasModifier(modifiers, ts.SyntaxKind.PublicKeyword)
-      || hasModifier(modifiers, ts.SyntaxKind.ProtectedKeyword)
-      || hasModifier(modifiers, ts.SyntaxKind.PrivateKeyword)) {
-    return modifiers;
-  }
-  const newModifiers = [...modifiers];
-  newModifiers.unshift(ts.factory.createModifier(ts.SyntaxKind.PublicKeyword));
-  return ts.factory.createNodeArray(modifiers);
-}
-
-/**
- * Removes public, private and protected modifiers from the given modifiers array.
- */
-export function removeClassModifiers(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
-  if (modifiers === undefined) {
-    return ts.factory.createNodeArray();
-  }
-  const newModifiers = [];
-  for (const modifier of modifiers) {
-    if (modifier.kind !== ts.SyntaxKind.PublicKeyword
-        && modifier.kind !== ts.SyntaxKind.ProtectedKeyword
-        && modifier.kind !== ts.SyntaxKind.PrivateKeyword) {
-      newModifiers.push(modifier);
-    }
-  }
-  return ts.factory.createNodeArray(newModifiers);
-}
-
-/**
- * Check whether a type node is a KeywordTypeNode.
- */
-function isKeywordType(typeNode: ts.TypeNode): boolean {
-  switch (typeNode.kind) {
-    case ts.SyntaxKind.AnyKeyword:
-    case ts.SyntaxKind.BigIntKeyword:
-    case ts.SyntaxKind.BooleanKeyword:
-    case ts.SyntaxKind.IntrinsicKeyword:
-    case ts.SyntaxKind.NeverKeyword:
-    case ts.SyntaxKind.NumberKeyword:
-    case ts.SyntaxKind.ObjectKeyword:
-    case ts.SyntaxKind.StringKeyword:
-    case ts.SyntaxKind.SymbolKeyword:
-    case ts.SyntaxKind.UndefinedKeyword:
-    case ts.SyntaxKind.UnknownKeyword:
-    case ts.SyntaxKind.VoidKeyword: 
-      return true;
-    default:
-      return false;
-  }
-}
-
-function isTypeAssignableTo(a: ts.TypeNode, b: ts.TypeNode): boolean {
-  if (ts.isTypeReferenceNode(a) && ts.isTypeReferenceNode(b)) {
-    if (a.typeName !== b.typeName) {
-      return false;
-    }
-    if (a.typeArguments === undefined || b.typeArguments === undefined) {
-      return a.typeArguments === b.typeArguments;
-    }
-    return a.typeArguments.every((typeArg, i) => isTypeAssignableTo(typeArg, b.typeArguments![i]))
-  }
-  if (ts.isUnionTypeNode(b)) {
-    return b.types.some(type => isTypeAssignableTo(a, type))
-  }
-  if (ts.isUnionTypeNode(a)) {
-    return a.types.some(type => isTypeAssignableTo(type, b))
-  }
-  if (ts.isArrayTypeNode(a) || ts.isArrayTypeNode(b)) {
-    if (!(ts.isArrayTypeNode(a) && ts.isArrayTypeNode(b))) {
-      return false;
-    }
-    return isTypeAssignableTo(a.elementType, b.elementType);
-  }
-  // if (ts.isLiteralTypeNode(a) || ts.isLiteralTypeNode(b)) {
-  //   if (!(ts.isLiteralTypeNode(a) && ts.isLiteralTypeNode(b))) {
-  //     return false;
-  //   }
-  //   return a.literal.kind === b.literal.kind;
-  // }
-  if (isKeywordType(a) || isKeywordType(b)) {
-    if (!(isKeywordType(a) && isKeywordType(b))) {
-      return false;
-    }
-    return a.kind === b.kind;
-  }
-  const printer = ts.createPrinter();
-  console.log(ts.SyntaxKind[a.kind])
-  console.log(ts.isTypeReferenceNode(b))
-  console.log(printer.printNode(ts.EmitHint.Unspecified, a, a.getSourceFile()));
-  console.log(printer.printNode(ts.EmitHint.Unspecified, b, a.getSourceFile()));
-  throw new Error(`Could not check assignablility of two types. Support for type-checking is very limited right now.`);
-}
-
-function areTypesDisjoint(types: ts.TypeNode[]): boolean {
-  for (let i = 0; i < types.length; i++) {
-    for (let j = i+1; j < types.length; j++) {
-      if (isTypeAssignableTo(types[i], types[j])) {
-        return false;
-      }
-      if (isTypeAssignableTo(types[j], types[i])) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-function convertToClassElement(node: ts.Node): ts.ClassElement {
-  if (ts.isClassElement(node)) {
-    return node;
-  }
-  if (ts.isPropertySignature(node)) {
-    return ts.factory.createPropertyDeclaration(
-      node.decorators,
-      node.modifiers,
-      node.name,
-      node.questionToken,
-      node.type,
-      undefined,
-    )
-  }
-  if (ts.isParameter(node)) {
-    assert(ts.isIdentifier(node.name));
-    return ts.factory.createPropertyDeclaration(
-      node.decorators,
-      node.modifiers,
-      node.name,
-      node.questionToken,
-      node.type,
-      node.initializer
-    )
-  }
-  throw new Error(`Support for converting an interface declaration to an abstract class is very limited right now.`)
 }
 
 function buildTypeOfEquality(expr: ts.Expression, typeStr: ts.Expression) {
@@ -313,13 +61,6 @@ function buildBinaryExpression(operator: ts.BinaryOperator, args: ts.Expression[
   return result;
 }
 
-// export function isNodeExported(node: ts.Node): boolean {
-//   return (
-//     (ts.getCombinedModifierFlags(node as ts.Declaration) & ts.ModifierFlags.Export) !== 0 ||
-//     (!!node.parent && node.parent.kind === ts.SyntaxKind.SourceFile)
-//   );
-// }
-
 export default function generateCode(sourceFile: ts.SourceFile, options: CodeGeneratorOptions = {}): string {
 
   let out = '';
@@ -353,7 +94,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           } else if (ts.isConstructorDeclaration(member)) {
             for (const param of member.parameters) {
               if (hasClassModifier(param.modifiers)) {
-                result.push(convertToClassElement(param));
+                const classElement = convertToClassElement(param);
+                implementationLimitation(classElement !== null);
+                result.push(classElement);
               }
             }
           }
@@ -560,7 +303,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
           for (const member of declaration.members) {
             if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
-              assert(ts.isIdentifier(member.name));
+              implementationLimitation(ts.isIdentifier(member.name));
               if ((member.questionToken !== undefined || member.initializer !== undefined) === onlyOptional) {
                 result.push(
                   ts.factory.createParameterDeclaration(
@@ -786,7 +529,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   }
 
   function parameterToReference(param: ts.ParameterDeclaration): ts.Identifier {
-    assert(ts.isIdentifier(param.name));
+    implementationLimitation(ts.isIdentifier(param.name));
     return param.name;
   }
 
@@ -802,7 +545,11 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           `${rootNodeName}Base`,
           rootDeclaration.typeParameters,
           rootDeclaration.heritageClauses,
-          [...rootDeclaration.members].map(convertToClassElement),
+          rootDeclaration.members.map((decl: ts.ClassElement | ts.TypeElement) => {
+            const classElement = convertToClassElement(decl);
+            implementationLimitation(classElement !== null);
+            return classElement;
+          }),
         )
       );
       return;
@@ -1148,7 +895,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         if (param.type === undefined) {
           continue;
         }
-        assert(ts.isIdentifier(param.name));
+        implementationLimitation(ts.isIdentifier(param.name));
         for (const [typeToCastFrom, nodeType]  of getAutoCasts(param.type)) {
           autoCastStatements.push(
             ts.factory.createIfStatement(

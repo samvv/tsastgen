@@ -220,3 +220,14 @@ export function spread<T>(iterator: Iterator<T>): T[] {
   }
   return result;
 }
+
+
+export function implementationLimitation(test: boolean): asserts test {
+  if (!test) {
+    throw new Error('\
+You have given a TypeScript expression that this tool is not able to handle right now. \
+It is not possible to cover every case of what TypeScript compiler has to offer. \
+If you belive the usage is justified, please file an issue in the repository.\
+')
+  }
+}

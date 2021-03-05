@@ -1,6 +1,6 @@
 
 import ts from "typescript";
-import { assert, FastMap } from "./util";
+import { assert, FastMap, implementationLimitation } from "./util";
 
 let nextSymbolId = 0;
 
@@ -347,8 +347,8 @@ export class DeclarationResolver {
   }
 
   public resolveTypeReferenceNode(typeNode: ts.TypeReferenceNode): Symbol | null {
-    assert(typeNode.typeArguments === undefined);
-    assert(ts.isIdentifier(typeNode.typeName));
+    implementationLimitation(typeNode.typeArguments === undefined);
+    implementationLimitation(ts.isIdentifier(typeNode.typeName));
     return this.resolve(typeNode.typeName.getText(), typeNode);
   }
 
