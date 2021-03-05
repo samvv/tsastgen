@@ -160,6 +160,9 @@ export function removeClassModifiers(modifiers: ts.ModifiersArray | undefined): 
   return ts.factory.createNodeArray(newModifiers);
 }
 
+/**
+ * Check whether a type node is a KeywordTypeNode.
+ */
 function isKeywordType(typeNode: ts.TypeNode): boolean {
   switch (typeNode.kind) {
     case ts.SyntaxKind.AnyKeyword:
@@ -236,7 +239,7 @@ function areTypesDisjoint(types: ts.TypeNode[]): boolean {
   return true;
 }
 
-function convertToClassElement(node: ts.ClassElement | ts.TypeElement): ts.ClassElement {
+function convertToClassElement(node: ts.Node): ts.ClassElement {
   if (ts.isClassElement(node)) {
     return node;
   }
@@ -248,6 +251,17 @@ function convertToClassElement(node: ts.ClassElement | ts.TypeElement): ts.Class
       node.questionToken,
       node.type,
       undefined,
+    )
+  }
+  if (ts.isParameter(node)) {
+    assert(ts.isIdentifier(node.name));
+    return ts.factory.createPropertyDeclaration(
+      node.decorators,
+      node.modifiers,
+      node.name,
+      node.questionToken,
+      node.type,
+      node.initializer
     )
   }
   throw new Error(`Support for converting an interface declaration to an abstract class is very limited right now.`)
@@ -331,7 +345,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       for (const declaration of symbol.declarations) {
         assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
         for (const member of declaration.members) {
-          result.push(member);
+          if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
+            result.push(member);
+          } else if (ts.isConstructorDeclaration(member)) {
+            for (const param of member.parameters) {
+              result.push(convertToClassElement(param));
+            }
+          }
         }
       }
     }
