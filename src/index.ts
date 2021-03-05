@@ -1,6 +1,6 @@
 
 import ts from "typescript"
-import { areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, makePublic, removeClassModifiers } from "./helpers";
+import { areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, makePublic, removeClassModifiers } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
 import { assert, implementationLimitation, memoise } from "./util";
@@ -81,6 +81,12 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   function writeNode(node: ts.Node): void {
     write(printer.printNode(ts.EmitHint.Unspecified, node, sourceFile) + '\n\n');
+  }
+
+  function writeCustomNode(node: ts.Node): void {
+    if (!hasModifier(node.modifiers, ts.SyntaxKind.DeclareKeyword)) {
+      writeNode(node);
+    }
   }
 
   const getAllMembers = memoise((nodeType: Symbol): Array<ts.ClassElement | ts.TypeElement> => {
@@ -565,8 +571,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     const symbol = resolver.getSymbolForNode(node);
 
     if (symbol === null) {
-      writeNode(node);
+      writeCustomNode(node);
       return;
+    }
+
+    const exportModifier = []
+    if (isNodeExported(node)) {
+      exportModifier.push(ts.factory.createModifier(ts.SyntaxKind.ExportKeyword));
     }
 
     if (isIntermediate(symbol)) {
@@ -856,7 +867,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       writeNode(
         ts.factory.createTypeAliasDeclaration(
           undefined,
-          node.modifiers,
+          exportModifier,
           `${symbol.name}Parent`,
           undefined,
           ts.factory.createUnionTypeNode(
@@ -876,7 +887,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       writeNode(
         ts.factory.createTypeAliasDeclaration(
           undefined,
-          node.modifiers,
+          exportModifier,
           `${symbol.name}Child`,
           undefined,
           ts.factory.createUnionTypeNode(
@@ -890,6 +901,45 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
       const factoryParameters = getFieldsAsParameters(symbol)
       const autoCastStatements = [];
+
+      // function isX(value: any) {
+      //   return value.kind === SyntaxKind.X;
+      // }
+      writeNode(
+        ts.factory.createFunctionDeclaration(
+          undefined,
+          exportModifier,
+          undefined,
+          `is${symbol.name}`,
+          undefined,
+          [
+            ts.factory.createParameterDeclaration(
+              undefined,
+              undefined,
+              undefined,
+              'value',
+              undefined,
+              ts.factory.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword),
+              undefined
+            )
+          ],
+          ts.factory.createKeywordTypeNode(ts.SyntaxKind.BooleanKeyword),
+          ts.factory.createBlock([
+            ts.factory.createReturnStatement(
+              buildEquality(
+                ts.factory.createPropertyAccessExpression(
+                  ts.factory.createIdentifier('value'),
+                  'kind'
+                ),
+                ts.factory.createPropertyAccessExpression(
+                  ts.factory.createIdentifier('SyntaxKind'),
+                  symbol.name
+                )
+              )
+            )
+          ])
+        )
+      )
 
       for (const param of factoryParameters) {
         if (param.type === undefined) {
@@ -923,7 +973,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       writeNode(
         ts.factory.createFunctionDeclaration(
           undefined,
-          node.modifiers,
+          exportModifier,
           undefined,
           `create${symbol.name}`,
           undefined,
@@ -951,7 +1001,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     // We only get here if the node resolves to a symbol but is not an AST node
     // type nor an AST variant type. In this case, we just pass through the
     // TypeScript node as-is.
-    writeNode(node);
+    writeCustomNode(node);
 
   }
 
