@@ -157,6 +157,8 @@ export class Symbol {
    * 
    * This property is only available to symbols that map to class or interface
    * declarations.
+   * 
+   * @returns A list of inherited symbols in method resolution order.
    */
   public get allInheritsFrom(): Symbol[] {
     const visited = new Set<Symbol>();
@@ -173,6 +175,10 @@ export class Symbol {
     return result;
   }
 
+  public get baseSymbols(): Symbol[] {
+    return this.allInheritsFrom.filter(baseSymbol => baseSymbol.inheritsFrom.length === 0);
+  }
+
   public get members() {
     const result = []
     for (const declaration of this.declarations) {
@@ -182,6 +188,29 @@ export class Symbol {
       }
     }
     return result;
+  }
+
+  /**
+   * Get the chain of classes/interfaces for which the inheritance leads to the given symbol.
+   * 
+   * @param target The class or interface that inherits this symbol, directly or indirectly.
+   * @returns An inheritance chain including this symbol and the target symbol or nothing if the target symbol was not found.
+   * @deprecated
+   */
+  public getInheritsFromChain(target: Symbol): Symbol[] | null {
+    const visit = (symbol: Symbol, path: Symbol[]): Symbol[] | null => {
+      if (symbol === target) {
+        return path;
+      }
+      for (const inheritedSymbol of symbol.inheritsFrom) {
+        const result = visit(inheritedSymbol, [...path, inheritedSymbol ]);
+        if (result !== null) {
+          return result;
+        }
+      }
+      return null;
+    }
+    return visit(this, [ this ]);
   }
 
 }

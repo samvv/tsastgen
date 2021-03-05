@@ -1,5 +1,5 @@
 
-import ts, { factory, getParsedCommandLineOfConfigFile, isTypeElement, isTypeNode, isVariableStatement, isYieldExpression, TypeNode } from "typescript"
+import ts from "typescript"
 
 import { DeclarationResolver, Symbol } from "./resolver";
 import { assert, memoise } from "./util";
@@ -12,7 +12,7 @@ function first<T1, T2>(tuple: [T1, T2]): T1 {
   return tuple[0];
 }
 
-function second<T>(tuple: T[]): T {
+function second<T1, T2>(tuple: [T1, T2]): T2 {
   return tuple[1];
 }
 
@@ -91,13 +91,15 @@ export function findNodeNamed(node: ts.Node, name: string): ts.Node | null {
 }
 
 /**
- * Search a class declaration or class expression for a constructor and returns it if found.
+ * Search a class or interface for a constructor and returns it if found.
  *
- * @param node The class to search in
+ * @param node The class or interface to search in
  */
-export function findConstructor(node: ts.ClassDeclaration | ts.ClassExpression): ts.ConstructorDeclaration | null {
+export function findConstructor(
+  node: ts.ClassDeclaration | ts.ClassExpression | ts.InterfaceDeclaration
+): ts.ConstructSignatureDeclaration | ts.ConstructorDeclaration | null {
   for (const member of node.members) {
-    if (ts.isConstructorDeclaration(member)) {
+    if (ts.isConstructorDeclaration(member) || ts.isConstructSignatureDeclaration(member)) {
       return member as ts.ConstructorDeclaration;
     }
   }
@@ -323,6 +325,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   let out = '';
 
   const generateIdField = true;
+  const parentMemberName = 'parentNode';
   const generateParentNodes = true;
   const generateVisitor = true;
   const rootNodeName = options.rootNodeName ?? 'Syntax';
@@ -349,7 +352,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
             result.push(member);
           } else if (ts.isConstructorDeclaration(member)) {
             for (const param of member.parameters) {
-              result.push(convertToClassElement(param));
+              if (hasClassModifier(param.modifiers)) {
+                result.push(convertToClassElement(param));
+              }
             }
           }
         }
@@ -402,7 +407,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     if (isVariant(symbol)) {
     }
     return [];
-  });
+  }, 'id');
 
   const isAST = (symbol: Symbol): boolean => {
     return isVariant(symbol) || isIntermediate(symbol) || isNodeType(symbol);
@@ -427,7 +432,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       }
       return result;
     }
-    return [];
+    if (ts.isArrayTypeNode(typeNode)) {
+      return getAllNodeTypesInTypeNode(typeNode.elementType);
+    }
+    if (ts.isLiteralTypeNode(typeNode) || isKeywordType(typeNode)) {
+      return [];
+    }
+    throw new Error(`Could not find references to AST nodes in type: type ${ts.SyntaxKind[typeNode.kind]} is too complex to process by this tool`);
   }
 
   const getAllASTInFieldsOfSymbol = memoise((symbol: Symbol) => {
@@ -498,58 +509,214 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
     const result: Array<ts.ParameterDeclaration> = [];
 
-    function generateParameters(isOptional: boolean) {
-      const methodResolutionOrder = [symbol, ...symbol.allInheritsFrom.filter(upSymbol => upSymbol !== rootSymbol), rootSymbol!];
-      if (!isOptional) {
-        methodResolutionOrder.reverse();
+    const visitSymbol = (currSymbol: Symbol, onlyOptional: boolean, ownMember: boolean) => {
+
+      // Find any constructor signature or declaration. If found, we will use
+      // the parameters of this constructor as the parameters that should be
+      // returned by this function.
+      let constructorDeclaration = null;
+      for (const declaration of currSymbol.declarations) {
+        assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
+        const constructor = findConstructor(declaration);
+        if (constructor !== null) {
+          constructorDeclaration = constructor;
+          break;
+        }
       }
-      for (const currSymbol of methodResolutionOrder) {
+
+      if (constructorDeclaration !== null) {
+
+        // If we found a constructor or a constructor signature, then the
+        // signature serves as the list of parameters this node type accepts.
+        // We perform some small checks to make sure we have only nodes we're
+        // interested in and add the 'public' if requested.
+        for (const param of constructorDeclaration.parameters) {
+          if ((param.questionToken !== undefined || param.initializer !== undefined) === onlyOptional) {
+            result.push(
+              ts.factory.createParameterDeclaration(
+                param.decorators,
+                isConstructor && ownMember ? makePublic(param.modifiers) : removeClassModifiers(param.modifiers),
+                param.dotDotDotToken,
+                param.name,
+                param.questionToken,
+                param.type,
+                param.initializer
+              )
+            );
+          }
+        }
+
+        // A constructor should contain all parameters of all the base
+        // classes, so we shouldn't contiue with searching for more.
+        return false;
+
+      } else {
+
+        // The curent symbol did not have a constructor, so we assume that
+        // all members are added as-is to the fields of the node type.
+        // We perform some small checks to make sure we have only nodes we're
+        // interested in and add the 'public' if requested.
         for (const declaration of currSymbol.declarations) {
-          if (ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration)) {
-            for (const member of declaration.members) {
-              if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
-                assert(ts.isIdentifier(member.name));
-                if ((member.questionToken !== undefined || member.initializer !== undefined) === isOptional) {
-                  result.push(
-                    ts.factory.createParameterDeclaration(
-                      member.decorators,
-                      isConstructor && currSymbol !== rootSymbol ? makePublic(member.modifiers) : removeClassModifiers(member.modifiers),
-                      undefined,
-                      member.name,
-                      member.questionToken,
-                      member.type,
-                      member.initializer
-                    )
-                  );
-                }
-              } else if (ts.isConstructorDeclaration(member)) {
-                for (const param of member.parameters) {
-                  if ((param.questionToken !== undefined || param.initializer !== undefined) === isOptional) {
-                    result.push(
-                      ts.factory.createParameterDeclaration(
-                        param.decorators,
-                        isConstructor && currSymbol !== rootSymbol ? makePublic(param.modifiers) : removeClassModifiers(param.modifiers),
-                        param.dotDotDotToken,
-                        param.name,
-                        param.questionToken,
-                        param.type,
-                        param.initializer
-                      )
-                    );
-                  }
-                }
+          assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
+          for (const member of declaration.members) {
+            if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
+              assert(ts.isIdentifier(member.name));
+              if ((member.questionToken !== undefined || member.initializer !== undefined) === onlyOptional) {
+                result.push(
+                  ts.factory.createParameterDeclaration(
+                    member.decorators,
+                    isConstructor && ownMember ? makePublic(member.modifiers) : removeClassModifiers(member.modifiers),
+                    undefined,
+                    member.name,
+                    member.questionToken,
+                    member.type,
+                    member.initializer
+                  )
+                );
               }
             }
+          }
+        }
+
+      }
+
+      // If we got here there were no early returns indicating that the visitor
+      // should stop visiting the current inheritance chain. Just signal the visitor
+      // that it may continue.
+      return true;
+    }
+
+    const inheritanceChains: Symbol[][] = [];
+
+    const generateInheritanceChains = (symbol: Symbol, path: Symbol[]) => {
+      if (symbol.inheritsFrom.length === 0) {
+        inheritanceChains.push(path);
+      }
+      for (const inheritedSymbol of symbol.inheritsFrom) {
+        generateInheritanceChains(inheritedSymbol, [...path, inheritedSymbol ])
+      }
+    }
+
+    generateInheritanceChains(symbol, [ symbol ]);
+
+    const visitBottomUp = (onlyOptional = false) => {
+
+      // First we visit the symbol itself and add any members we're interested
+      // in to the result.
+      if (!visitSymbol(symbol, onlyOptional, true)) {
+        return;
+      }
+
+      const visited = new Set<Symbol>();
+
+      // Next we walk though each individual inheritance chain, skipping a
+      // chain if `visitSymbol` returned false. Usually, this means a
+      // constructor was defined that consumes all parameters.
+      for (const chain of inheritanceChains) {
+
+        // Indicates whether the parameter belongs to `symbol` or to another base class.
+        // Interfaces do not set this variable to false. Only class declarations can do that.
+        let ownMembers = true;
+
+        for (const inheritedSymbol of chain.slice(1)) {
+          if (inheritedSymbol.declarations.some(ts.isClassDeclaration)) {
+            ownMembers = false;
+          }
+          if (visited.has(inheritedSymbol)) {
+            // We only get here if the remaining part of the inheritance chain
+            // has already been visited.
+            break;
+          }
+          visited.add(inheritedSymbol);
+          if (!visitSymbol(inheritedSymbol, onlyOptional, ownMembers)) {
+            break;
           }
         }
       }
     }
 
-    generateParameters(false),
-    generateParameters(true)
+    visitBottomUp(false);
+    visitBottomUp(true);
 
     return result;
+  }
 
+  function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement | null {
+    if (ts.isUnionTypeNode(type)) {
+      const isNullable = type.types.find(t => ts.isLiteralTypeNode(t) && t.literal.kind === ts.SyntaxKind.NullKeyword) !== undefined;
+      const remainingTypes = type.types.filter(t => t.kind !== ts.SyntaxKind.NullKeyword);
+      const mapped: Array<[ts.TypeNode, ts.Statement]> = [];
+      for (const elementTypeNode of remainingTypes) {
+        const yieldStatement = buildChildrenOfStatement(elementTypeNode, value);
+        if (yieldStatement !== null) {
+          mapped.push([ elementTypeNode, yieldStatement ]);
+        }
+      }
+      if (mapped.length === 0) {
+        return null;
+      }
+      if (mapped.length > (isNullable ? 2 : 1)) {
+        for (let i = 0; i < mapped.length; i++) {
+          const [elementTypeNode, yieldStatement] = mapped[i];
+          if (yieldStatement !== null) {
+            mapped[i][1] = (
+              ts.factory.createIfStatement(
+                buildPredicateFromTypeNode(elementTypeNode, value),
+                yieldStatement
+              )
+            )
+          }
+        }
+      }
+      let result: ts.Statement = mapped.length === 1
+        ? mapped[0][1]
+        : ts.factory.createBlock(mapped.map(pair => pair[1]));
+      if (isNullable) {
+        result = ts.factory.createIfStatement(
+          ts.factory.createBinaryExpression(
+            value,
+            ts.SyntaxKind.ExclamationEqualsEqualsToken,
+            ts.factory.createNull()
+          ),
+          result,
+        )
+      }
+      return result;
+    }
+    if (ts.isTypeReferenceNode(type)
+        && type.typeName.getText() === 'Array'
+        && type.typeArguments !== undefined) {
+      const yieldStatements = buildChildrenOfStatement(type.typeArguments[0], ts.factory.createIdentifier('element'))
+      if (yieldStatements === null) {
+        return null;
+      }
+      return ts.factory.createForOfStatement(
+        undefined,
+        ts.factory.createVariableDeclarationList([
+          ts.factory.createVariableDeclaration('element')
+        ], ts.NodeFlags.Let),
+        value,
+        yieldStatements,
+      )
+    }
+    if (ts.isArrayTypeNode(type)) {
+      const yieldStatements = buildChildrenOfStatement(type.elementType, ts.factory.createIdentifier('element'));
+      if (yieldStatements === null) {
+        return null;
+      }
+      return ts.factory.createForOfStatement(
+        undefined,
+        ts.factory.createVariableDeclarationList([
+          ts.factory.createVariableDeclaration('element')
+        ], ts.NodeFlags.Let),
+        value,
+        yieldStatements
+      )
+    }
+    if (ts.isTypeReferenceNode(type)) {
+      return ts.factory.createExpressionStatement(ts.factory.createYieldExpression(undefined, value));
+    }
+    return null;
   }
 
   function buildPredicateFromTypeNode(type: ts.TypeNode, value: ts.Expression): ts.Expression {
@@ -797,6 +964,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
     if (isNodeType(symbol)) {
 
+      assert(ts.isInterfaceDeclaration(node) || ts.isClassDeclaration(node));
+
       const parentSymbols = getAllNodeTypesHavingSymbolInField(symbol);
       const childSymbols = getAllASTInFieldsOfSymbol(symbol);
       const membersWithAST = getAllMembers(symbol).filter(member =>
@@ -804,82 +973,12 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         && member.type !== undefined
         && getAllNodeTypesInTypeNode(member.type).length > 0) as ts.PropertyDeclaration[];
 
-      function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement | null {
-        if (ts.isUnionTypeNode(type)) {
-          const isNullable = type.types.find(t => ts.isLiteralTypeNode(t) && t.literal.kind === ts.SyntaxKind.NullKeyword) !== undefined;
-          const remainingTypes = type.types.filter(t => t.kind !== ts.SyntaxKind.NullKeyword);
-          const mapped: Array<[ts.TypeNode, ts.Statement]> = [];
-          for (const elementTypeNode of remainingTypes) {
-            const yieldStatement = buildChildrenOfStatement(elementTypeNode, value);
-            if (yieldStatement !== null) {
-              mapped.push([ elementTypeNode, yieldStatement ]);
-            }
-          }
-          if (mapped.length === 0) {
-            return null;
-          }
-          if (mapped.length > (isNullable ? 2 : 1)) {
-            for (let i = 0; i < mapped.length; i++) {
-              const [elementTypeNode, yieldStatement] = mapped[i];
-              if (yieldStatement !== null) {
-                mapped[i][1] = (
-                  ts.factory.createIfStatement(
-                    buildPredicateFromTypeNode(elementTypeNode, value),
-                    yieldStatement
-                  )
-                )
-              }
-            }
-          }
-          let result: ts.Statement = mapped.length === 1
-            ? mapped[0][1]
-            : ts.factory.createBlock(mapped.map(pair => pair[1]));
-          if (isNullable) {
-            result = ts.factory.createIfStatement(
-              ts.factory.createBinaryExpression(
-                value,
-                ts.SyntaxKind.ExclamationEqualsEqualsToken,
-                ts.factory.createNull()
-              ),
-              result,
-            )
-          }
-          return result;
+      let constructor = null;
+      for (const member of node.members) {
+        if (ts.isConstructorDeclaration(member)) {
+          constructor = member;
+          break;
         }
-        if (ts.isTypeReferenceNode(type)
-            && type.typeName.getText() === 'Array'
-            && type.typeArguments !== undefined) {
-          const yieldStatements = buildChildrenOfStatement(type.typeArguments[0], ts.factory.createIdentifier('element'))
-          if (yieldStatements === null) {
-            return null;
-          }
-          return ts.factory.createForOfStatement(
-            undefined,
-            ts.factory.createVariableDeclarationList([
-              ts.factory.createVariableDeclaration('element')
-            ], ts.NodeFlags.Let),
-            value,
-            yieldStatements,
-          )
-        }
-        if (ts.isArrayTypeNode(type)) {
-          const yieldStatements = buildChildrenOfStatement(type.elementType, ts.factory.createIdentifier('element'));
-          if (yieldStatements === null) {
-            return null;
-          }
-          return ts.factory.createForOfStatement(
-            undefined,
-            ts.factory.createVariableDeclarationList([
-              ts.factory.createVariableDeclaration('element')
-            ], ts.NodeFlags.Let),
-            value,
-            yieldStatements
-          )
-        }
-        if (ts.isTypeReferenceNode(type)) {
-          return ts.factory.createExpressionStatement(ts.factory.createYieldExpression(undefined, value));
-        }
-        return null;
       }
 
       const classMembers = [];
@@ -900,46 +999,28 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         )
       )
 
-      if (generateParentNodes) {
+      if (constructor === null) {
+        const constructorParameters = getFieldsAsParameters(symbol, true);
         classMembers.push(
-          // public parentNode: XParent | null = null;
-          ts.factory.createPropertyDeclaration(
+          // constructor(public field: T, ...) { super(field...) }
+          ts.factory.createConstructorDeclaration(
             undefined,
             undefined,
-            `parentNode`,
-            undefined,
-            ts.factory.createUnionTypeNode([
-              ts.factory.createLiteralTypeNode(
-                ts.factory.createNull()
-              ),
-              ts.factory.createTypeReferenceNode(`${symbol.name}Parent`, undefined)
-            ]),
-            ts.factory.createNull(),
-          )
-        )
-      }
-
-      const constructorParameters = getFieldsAsParameters(symbol, true);
-
-      classMembers.push(
-        // constructor(public field: T, ...) { super(field...) }
-        ts.factory.createConstructorDeclaration(
-          undefined,
-          undefined,
-          [
-            ...constructorParameters,
-          ],
-          ts.factory.createBlock([
-            ts.factory.createExpressionStatement(
-              ts.factory.createCallExpression(
-                ts.factory.createSuper(),
-                undefined,
-                constructorParameters.filter(param => !hasClassModifier(param.modifiers)).map(parameterToReference)
+            [
+              ...constructorParameters,
+            ],
+            ts.factory.createBlock([
+              ts.factory.createExpressionStatement(
+                ts.factory.createCallExpression(
+                  ts.factory.createSuper(),
+                  undefined,
+                  constructorParameters.filter(param => !hasClassModifier(param.modifiers)).map(parameterToReference)
+                )
               )
-            )
-          ])
-        )
-      )
+            ])
+          )
+        );
+      }
 
       classMembers.push(
         // public *getChildNodes(): Iterable<XChild> { ... }
@@ -971,9 +1052,30 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       )
 
       if (ts.isClassDeclaration(node)) {
-        classMembers.push(
-          ...node.members.filter(member => !ts.isConstructorDeclaration(member))
-        )
+        for (const member of node.members) {
+          if (generateParentNodes
+              && member.name !== undefined
+              && member.name.getText() === parentMemberName) {
+            classMembers.push(
+              // public parentNode: XParent | null = null;
+              ts.factory.createPropertyDeclaration(
+                undefined,
+                undefined,
+                `parentNode`,
+                undefined,
+                ts.factory.createUnionTypeNode([
+                  ts.factory.createLiteralTypeNode(
+                    ts.factory.createNull()
+                  ),
+                  ts.factory.createTypeReferenceNode(`${symbol.name}Parent`, undefined)
+                ]),
+                ts.factory.createNull(),
+              )
+            );
+          } else {
+            classMembers.push(member);
+          }
+        }
       }
 
       writeNode(
@@ -1088,9 +1190,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
               ts.factory.createNewExpression(
                 ts.factory.createIdentifier(symbol.name),
                 undefined,
-                [
-                  ...factoryParameters.map(parameterToReference)
-                ]
+                factoryParameters.map(parameterToReference)
               )
             )
           ])
@@ -1394,7 +1494,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     )
   )
 
-  write(`
+  if (generateParentNodes) {
+    write(`
 export function setParents(node: ${rootNodeName}, parentNode: ${rootNodeName} | null = null): void {
   // We cast to any here because parentNode is strongly typed and not generic
   // enough to accept arbitrary AST nodes
@@ -1404,6 +1505,7 @@ export function setParents(node: ${rootNodeName}, parentNode: ${rootNodeName} | 
   }
 }
 `);
+  }
 
   return out;
 
