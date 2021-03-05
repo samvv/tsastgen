@@ -347,8 +347,9 @@ export class DeclarationResolver {
   }
 
   public resolveTypeReferenceNode(typeNode: ts.TypeReferenceNode): Symbol | null {
-    implementationLimitation(typeNode.typeArguments === undefined);
-    implementationLimitation(ts.isIdentifier(typeNode.typeName));
+    if (typeNode.typeArguments !== undefined || !ts.isIdentifier(typeNode.typeName)) {
+      return null;
+    }
     return this.resolve(typeNode.typeName.getText(), typeNode);
   }
 

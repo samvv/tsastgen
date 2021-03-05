@@ -146,7 +146,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         && !symbol.allExtendsTo.some(downSymbol => isNodeType(downSymbol));
   }, 'id');
 
-  const getAllNodeTypesInside = memoise((symbol: Symbol): Symbol[] => {
+  const getAllNodeTypesDerivingFrom = memoise((symbol: Symbol): Symbol[] => {
     if (isNodeType(symbol)) {
       return [ symbol ]
     }
@@ -190,6 +190,28 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     throw new Error(`Could not find references to AST nodes in type: type ${ts.SyntaxKind[typeNode.kind]} is too complex to process by this tool`);
   }
 
+  const getAllToplevelNodeTypesInTypeNode = (typeNode: ts.TypeNode): Symbol[] => {
+    if (ts.isTypeReferenceNode(typeNode)) {
+      const symbol = resolver.resolveTypeReferenceNode(typeNode);
+      if (symbol === null || !isAST(symbol)) {
+        return [];
+      }
+      return [ symbol ]
+    }
+    if (ts.isUnionTypeNode(typeNode)) {
+      const result = [];
+      for (const elementTypeNode of typeNode.types) {
+        result.push(...getAllToplevelNodeTypesInTypeNode(elementTypeNode))
+      }
+      return result;
+    }
+    if (ts.isArrayTypeNode(typeNode) || ts.isLiteralTypeNode(typeNode) || isKeywordType(typeNode)) {
+      return [];
+    }
+    throw new Error(`Could not find references to AST nodes in type: type ${ts.SyntaxKind[typeNode.kind]} is too complex to process by this tool`);
+  }
+
+
   const getAllASTInFieldsOfSymbol = memoise((symbol: Symbol) => {
     const result = new Set<Symbol>();
     for (const param of getFieldsAsParameters(symbol)) {
@@ -220,9 +242,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   const getAutoCasts = (typeNode: ts.TypeNode): Array<[ts.TypeNode, Symbol]> => {
     const result: Array<[ts.TypeNode, Symbol]> = [];
-    for (const symbol of getAllNodeTypesInTypeNode(typeNode)) {
+    for (const symbol of getAllToplevelNodeTypesInTypeNode(typeNode)) {
       const typesToCheck: Array<[ts.TypeNode, Symbol]> = [];
-      const nodeTypes = getAllNodeTypesInside(symbol)
+      const nodeTypes = getAllNodeTypesDerivingFrom(symbol)
       for (const nodeType of nodeTypes) {
         const requiredParameters = getFieldsAsParameters(nodeType).filter(p => p.questionToken === undefined && p.initializer === undefined)
         if (requiredParameters.length === 1) {
@@ -475,14 +497,21 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         undefined,
         [ value ]
       );
-    } else if (ts.isUnionTypeNode(type)) {
+    }
+    if (ts.isUnionTypeNode(type)) {
       return buildBinaryExpression(
         ts.SyntaxKind.BarBarToken,
         type.types.map(elementType => buildPredicateFromTypeNode(elementType, value))
       )
-    } else if (ts.isTypeReferenceNode(type)) {
-      if (!ts.isIdentifier(type.typeName)) {
-        throw new Error(`Node is too complex to be processed.`)
+    }
+    if (ts.isTypeReferenceNode(type)) {
+      if (type.typeName.getText() === 'Array'
+          && type.typeArguments !== undefined) {
+        return ts.factory.createCallExpression(
+          ts.factory.createPropertyAccessExpression(ts.factory.createIdentifier('Array'), 'isArray'),
+          undefined,
+          [ value ]
+        );
       }
       const referencedSymbol = resolver.resolveTypeReferenceNode(type);
       if (referencedSymbol === null) {
@@ -493,7 +522,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         undefined,
         [ value ]
       );
-    } else {
+    }
+    if (isKeywordType(type)) {
       switch (type.kind) {
         case ts.SyntaxKind.NeverKeyword:
           return ts.factory.createFalse();
