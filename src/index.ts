@@ -1,11 +1,19 @@
 
-import ts from "typescript"
+import ts, { factory, getParsedCommandLineOfConfigFile, isTypeElement, isTypeNode, isVariableStatement, isYieldExpression, TypeNode } from "typescript"
 
 import { DeclarationResolver, Symbol } from "./resolver";
 import { assert, memoise } from "./util";
 
 export interface CodeGeneratorOptions {
   rootNodeName?: string;
+}
+
+function first<T1, T2>(tuple: [T1, T2]): T1 {
+  return tuple[0];
+}
+
+function second<T>(tuple: T[]): T {
+  return tuple[1];
 }
 
 /**
@@ -118,7 +126,7 @@ function hasClassModifier(modifiers: ts.ModifiersArray | undefined): boolean {
 /**
  * Adds the public class modifier if no class modifier has been specified yet.
  */
-function makePublic(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
+export function makePublic(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
   if (modifiers === undefined) {
     return ts.factory.createNodeArray([
       ts.factory.createModifier(ts.SyntaxKind.PublicKeyword)
@@ -137,7 +145,7 @@ function makePublic(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray
 /**
  * Removes public, private and protected modifiers from the given modifiers array.
  */
-function removeClassModifiers(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
+export function removeClassModifiers(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
   if (modifiers === undefined) {
     return ts.factory.createNodeArray();
   }
@@ -150,6 +158,82 @@ function removeClassModifiers(modifiers: ts.ModifiersArray | undefined): ts.Modi
     }
   }
   return ts.factory.createNodeArray(newModifiers);
+}
+
+function isKeywordType(typeNode: ts.TypeNode): boolean {
+  switch (typeNode.kind) {
+    case ts.SyntaxKind.AnyKeyword:
+    case ts.SyntaxKind.BigIntKeyword:
+    case ts.SyntaxKind.BooleanKeyword:
+    case ts.SyntaxKind.IntrinsicKeyword:
+    case ts.SyntaxKind.NeverKeyword:
+    case ts.SyntaxKind.NumberKeyword:
+    case ts.SyntaxKind.ObjectKeyword:
+    case ts.SyntaxKind.StringKeyword:
+    case ts.SyntaxKind.SymbolKeyword:
+    case ts.SyntaxKind.UndefinedKeyword:
+    case ts.SyntaxKind.UnknownKeyword:
+    case ts.SyntaxKind.VoidKeyword: 
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isTypeAssignableTo(a: ts.TypeNode, b: ts.TypeNode): boolean {
+  if (ts.isTypeReferenceNode(a) && ts.isTypeReferenceNode(b)) {
+    if (a.typeName !== b.typeName) {
+      return false;
+    }
+    if (a.typeArguments === undefined || b.typeArguments === undefined) {
+      return a.typeArguments === b.typeArguments;
+    }
+    return a.typeArguments.every((typeArg, i) => isTypeAssignableTo(typeArg, b.typeArguments![i]))
+  }
+  if (ts.isUnionTypeNode(b)) {
+    return b.types.some(type => isTypeAssignableTo(a, type))
+  }
+  if (ts.isUnionTypeNode(a)) {
+    return a.types.some(type => isTypeAssignableTo(type, b))
+  }
+  if (ts.isArrayTypeNode(a) || ts.isArrayTypeNode(b)) {
+    if (!(ts.isArrayTypeNode(a) && ts.isArrayTypeNode(b))) {
+      return false;
+    }
+    return isTypeAssignableTo(a.elementType, b.elementType);
+  }
+  // if (ts.isLiteralTypeNode(a) || ts.isLiteralTypeNode(b)) {
+  //   if (!(ts.isLiteralTypeNode(a) && ts.isLiteralTypeNode(b))) {
+  //     return false;
+  //   }
+  //   return a.literal.kind === b.literal.kind;
+  // }
+  if (isKeywordType(a) || isKeywordType(b)) {
+    if (!(isKeywordType(a) && isKeywordType(b))) {
+      return false;
+    }
+    return a.kind === b.kind;
+  }
+  const printer = ts.createPrinter();
+  console.log(ts.SyntaxKind[a.kind])
+  console.log(ts.isTypeReferenceNode(b))
+  console.log(printer.printNode(ts.EmitHint.Unspecified, a, a.getSourceFile()));
+  console.log(printer.printNode(ts.EmitHint.Unspecified, b, a.getSourceFile()));
+  throw new Error(`Could not check assignablility of two types. Support for type-checking is very limited right now.`);
+}
+
+function areTypesDisjoint(types: ts.TypeNode[]): boolean {
+  for (let i = 0; i < types.length; i++) {
+    for (let j = i+1; j < types.length; j++) {
+      if (isTypeAssignableTo(types[i], types[j])) {
+        return false;
+      }
+      if (isTypeAssignableTo(types[j], types[i])) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 function convertToClassElement(node: ts.ClassElement | ts.TypeElement): ts.ClassElement {
@@ -167,6 +251,14 @@ function convertToClassElement(node: ts.ClassElement | ts.TypeElement): ts.Class
     )
   }
   throw new Error(`Support for converting an interface declaration to an abstract class is very limited right now.`)
+}
+
+function buildTypeOfEquality(expr: ts.Expression, typeStr: ts.Expression) {
+  return ts.factory.createBinaryExpression(
+    ts.factory.createTypeOfExpression(expr),
+    ts.SyntaxKind.EqualsEqualsEqualsToken,
+    typeStr
+  )
 }
 
 function buildCond(cases: [ts.Expression, ts.Statement][]): ts.IfStatement {
@@ -246,21 +338,22 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     return result;
   }, 'id');
 
-  function isTypeNodeReferencingAST(node: ts.Node): boolean {
+  const isTypeNodeOnlyReferencingAST = (node: ts.Node): boolean => {
     if (ts.isUnionTypeNode(node)) {
-      return node.types.every(isTypeNodeReferencingAST);
+      return node.types.every(isTypeNodeOnlyReferencingAST);
     }
     if (ts.isTypeReferenceNode(node)) {
       const symbol = resolver.resolveTypeReferenceNode(node);
-      return symbol !== null && (isNodeType(symbol) || isVariant(symbol));
+      return symbol !== null && (isAST(symbol));
     }
     return false;
   }
+
   const isVariant = memoise((symbol: Symbol): boolean => {
     if (!symbol.isTypeAlias()) {
       return false;
     }
-    return isTypeNodeReferencingAST(symbol.asTypeAliasDeclaration().type)
+    return isTypeNodeOnlyReferencingAST(symbol.asTypeAliasDeclaration().type)
   }, 'id');
 
   const isIntermediate = memoise((symbol: Symbol): boolean => {
@@ -271,7 +364,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         && symbol.allExtendsTo.some(downSymbol => isNodeType(downSymbol));
   }, 'id')
 
-
   const isNodeType = memoise((symbol: Symbol): boolean => {
     if (!symbol.isClassOrInterface()) {
       return false;
@@ -280,8 +372,42 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         && !symbol.allExtendsTo.some(downSymbol => isNodeType(downSymbol));
   }, 'id');
 
+  const getAllNodeTypesInside = memoise((symbol: Symbol): Symbol[] => {
+    if (isNodeType(symbol)) {
+      return [ symbol ]
+    }
+    if (isIntermediate(symbol)) {
+      return symbol.allExtendsTo.filter(otherSymbol => isNodeType(otherSymbol))
+    }
+    if (isVariant(symbol)) {
+    }
+    return [];
+  });
+
   const isAST = (symbol: Symbol): boolean => {
     return isVariant(symbol) || isIntermediate(symbol) || isNodeType(symbol);
+  }
+
+  const getAllNodeTypesInTypeNode = (typeNode: ts.TypeNode): Symbol[] => {
+    if (ts.isTypeReferenceNode(typeNode)) {
+      if (typeNode.typeName.getText() === 'Array'
+          && typeNode.typeArguments !== undefined) {
+        return getAllNodeTypesInTypeNode(typeNode.typeArguments[0]);
+      }
+      const symbol = resolver.resolveTypeReferenceNode(typeNode);
+      if (symbol === null || !isAST(symbol)) {
+        return [];
+      }
+      return [ symbol ]
+    }
+    if (ts.isUnionTypeNode(typeNode)) {
+      const result = [];
+      for (const elementTypeNode of typeNode.types) {
+        result.push(...getAllNodeTypesInTypeNode(elementTypeNode))
+      }
+      return result;
+    }
+    return [];
   }
 
   const getAllASTInFieldsOfSymbol = memoise((symbol: Symbol) => {
@@ -312,10 +438,45 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     return result;
   }, 'id');
 
+  const getAutoCasts = (typeNode: ts.TypeNode): Array<[ts.TypeNode, Symbol]> => {
+    const result: Array<[ts.TypeNode, Symbol]> = [];
+    for (const symbol of getAllNodeTypesInTypeNode(typeNode)) {
+      const typesToCheck: Array<[ts.TypeNode, Symbol]> = [];
+      const nodeTypes = getAllNodeTypesInside(symbol)
+      for (const nodeType of nodeTypes) {
+        const requiredParameters = getFieldsAsParameters(nodeType).filter(p => p.questionToken === undefined && p.initializer === undefined)
+        if (requiredParameters.length === 1) {
+          const uniqueParameter = requiredParameters[0];
+          if (uniqueParameter.type === undefined) {
+            continue;
+          }
+          typesToCheck.push([uniqueParameter.type, nodeType])
+        }
+      }
+      if (areTypesDisjoint(typesToCheck.map(first))) {
+        result.push(...typesToCheck);
+      }
+    }
+    return result;
+  }
+
+  function addAutoCastsToParameter(param: ts.ParameterDeclaration) {
+    return ts.factory.createParameterDeclaration(
+      param.decorators,
+      param.modifiers,
+      param.dotDotDotToken,
+      param.name,
+      param.questionToken,
+      param.type !== undefined
+        ? ts.factory.createUnionTypeNode([param.type, ...getAutoCasts(param.type).map(([typeNode, symbol]) => typeNode)])
+        : undefined,
+      param.initializer
+    )
+  }
+
   function getFieldsAsParameters(symbol: Symbol, isConstructor = false): Array<ts.ParameterDeclaration> {
 
     const result: Array<ts.ParameterDeclaration> = [];
-
 
     function generateParameters(isOptional: boolean) {
       const methodResolutionOrder = [symbol, ...symbol.allInheritsFrom.filter(upSymbol => upSymbol !== rootSymbol), rootSymbol!];
@@ -403,13 +564,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         case ts.SyntaxKind.AnyKeyword:
           return ts.factory.createTrue();
         case ts.SyntaxKind.StringKeyword:
-          return buildEquality(value, ts.factory.createStringLiteral('string'));
+          return buildTypeOfEquality(value, ts.factory.createStringLiteral('string'));
         case ts.SyntaxKind.NullKeyword:
-          return buildEquality(value, ts.factory.createNull());
+          return buildTypeOfEquality(value, ts.factory.createNull());
         case ts.SyntaxKind.BooleanKeyword:
-          return buildEquality(value, ts.factory.createStringLiteral('boolean'));
+          return buildTypeOfEquality(value, ts.factory.createStringLiteral('boolean'));
         case ts.SyntaxKind.NumberKeyword:
-          return buildEquality(value, ts.factory.createStringLiteral('number'));
+          return buildTypeOfEquality(value, ts.factory.createStringLiteral('number'));
       }
     }
     throw new Error(`Could not convert TypeScript type node to a type guard.`)
@@ -618,10 +779,10 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
       const parentSymbols = getAllNodeTypesHavingSymbolInField(symbol);
       const childSymbols = getAllASTInFieldsOfSymbol(symbol);
-      const membersWithSymbol = getAllMembers(symbol).filter(member =>
+      const membersWithAST = getAllMembers(symbol).filter(member =>
         (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member))
         && member.type !== undefined
-        && isTypeNodeReferencingAST(member.type)) as ts.PropertyDeclaration[];
+        && getAllNodeTypesInTypeNode(member.type).length > 0) as ts.PropertyDeclaration[];
 
       function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement | null {
         if (ts.isUnionTypeNode(type)) {
@@ -775,7 +936,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
             [ ts.factory.createTypeReferenceNode(`${symbol.name}Child`, undefined) ]
           ),
           ts.factory.createBlock(
-            membersWithSymbol.map(member => 
+            membersWithAST.map(member => 
               buildChildrenOfStatement(
                 member.type!,
                 ts.factory.createPropertyAccessChain(
@@ -859,21 +1020,50 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       );
 
       const factoryParameters = getFieldsAsParameters(symbol)
+      const autoCastStatements = [];
+
+      for (const param of factoryParameters) {
+        if (param.type === undefined) {
+          continue;
+        }
+        assert(ts.isIdentifier(param.name));
+        for (const [typeToCastFrom, nodeType]  of getAutoCasts(param.type)) {
+          autoCastStatements.push(
+            ts.factory.createIfStatement(
+              buildPredicateFromTypeNode(typeToCastFrom, param.name),
+              ts.factory.createExpressionStatement(
+                ts.factory.createAssignment(
+                  param.name,
+                  ts.factory.createCallExpression(
+                    ts.factory.createIdentifier(`create${nodeType.name}`),
+                    undefined,
+                    [
+                      param.name as ts.Identifier,
+                    ]
+                  )
+                )
+              )
+            )
+          );
+        }
+      }
+
       // export function createX(fields: T...): Y {
       //   return new X(fields...);
       // }
       writeNode(
         ts.factory.createFunctionDeclaration(
           undefined,
-          [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
+          node.modifiers,
           undefined,
           `create${symbol.name}`,
           undefined,
           [
-            ...factoryParameters,
+            ...factoryParameters.map(addAutoCastsToParameter),
           ],
           ts.factory.createTypeReferenceNode(symbol.name, undefined),
           ts.factory.createBlock([
+            ...autoCastStatements,
             ts.factory.createReturnStatement(
               ts.factory.createNewExpression(
                 ts.factory.createIdentifier(symbol.name),
