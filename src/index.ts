@@ -231,7 +231,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     for (const otherSymbol of resolver.getAllSymbols()) {
       if (isNodeType(otherSymbol)) {
         for (const referencedSymbol of getAllASTInFieldsOfSymbol(otherSymbol)) {
-          if (referencedSymbol.allExtendsTo.indexOf(nodeType) !== -1) {
+          const referencedNodeTypes = getAllNodeTypesDerivingFrom(referencedSymbol);
+          if (referencedNodeTypes.indexOf(nodeType) !== -1) {
             result.push(otherSymbol);
           }
         }
@@ -542,9 +543,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     throw new Error(`Could not convert TypeScript type node to a type guard.`)
   }
 
-
-  let nextTempId = 1;
-
   const rootSymbol = resolver.resolve(rootNodeName, sourceFile);
 
   if (rootSymbol === null) {
@@ -553,15 +551,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   const rootDeclaration = rootSymbol.declarations[0];
   if (!(ts.isClassDeclaration(rootDeclaration) || ts.isInterfaceDeclaration(rootDeclaration))) {
     throw new Error(`The root node '${rootNodeName}' must be a class or interface declaration.`)
-  }
-
-  let rootConstructor = null;
-  if (ts.isClassDeclaration(rootSymbol.declarations[0])) {
-    rootConstructor = rootDeclaration;
-  }
-
-  function generateTemporaryId(): string {
-    return `__tempid${nextTempId++}`
   }
 
   function parameterToReference(param: ts.ParameterDeclaration): ts.Identifier {
