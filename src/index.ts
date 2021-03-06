@@ -89,29 +89,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     }
   }
 
-  const getAllMembers = memoise((nodeType: Symbol): Array<ts.ClassElement | ts.TypeElement> => {
-    const result: Array<ts.ClassElement | ts.TypeElement> = [];
-    for (const symbol of [nodeType, ...nodeType.allInheritsFrom]) {
-      for (const declaration of symbol.declarations) {
-        assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
-        for (const member of declaration.members) {
-          if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
-            result.push(member);
-          } else if (ts.isConstructorDeclaration(member)) {
-            for (const param of member.parameters) {
-              if (hasClassModifier(param.modifiers)) {
-                const classElement = convertToClassElement(param);
-                implementationLimitation(classElement !== null);
-                result.push(classElement);
-              }
-            }
-          }
-        }
-      }
-    }
-    return result;
-  }, 'id');
-
   const isTypeNodeOnlyReferencingAST = (node: ts.TypeNode): boolean => {
     if (ts.isUnionTypeNode(node)) {
       return node.types.every(isTypeNodeOnlyReferencingAST);
@@ -124,10 +101,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   }
 
   const isVariant = memoise((symbol: Symbol): boolean => {
-    if (!symbol.isTypeAlias()) {
-      return false;
-    }
-    return isTypeNodeOnlyReferencingAST(symbol.asTypeAliasDeclaration().type)
+    return symbol.isTypeAlias()
+        && isTypeNodeOnlyReferencingAST(symbol.asTypeAliasDeclaration().type;
   }, 'id');
 
   const isIntermediate = memoise((symbol: Symbol): boolean => {
@@ -154,12 +129,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       return symbol.allExtendsTo.filter(otherSymbol => isNodeType(otherSymbol))
     }
     if (isVariant(symbol)) {
+      return getAllNodeTypesInTypeNode(symbol.asTypeAliasDeclaration().type)
     }
     return [];
   }, 'id');
 
   const isAST = (symbol: Symbol): boolean => {
-    return isVariant(symbol) || isIntermediate(symbol) || isNodeType(symbol);
+    return symbol === rootSymbol || isVariant(symbol) || isIntermediate(symbol) || isNodeType(symbol);
   }
 
   const getAllNodeTypesInTypeNode = (typeNode: ts.TypeNode): Symbol[] => {
@@ -190,7 +166,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     throw new Error(`Could not find references to AST nodes in type: type ${ts.SyntaxKind[typeNode.kind]} is too complex to process by this tool`);
   }
 
-  const getAllToplevelNodeTypesInTypeNode = (typeNode: ts.TypeNode): Symbol[] => {
+  const getAllASTTypesInTypeNode = (typeNode: ts.TypeNode): Symbol[] => {
     if (ts.isTypeReferenceNode(typeNode)) {
       const symbol = resolver.resolveTypeReferenceNode(typeNode);
       if (symbol === null || !isAST(symbol)) {
@@ -201,7 +177,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     if (ts.isUnionTypeNode(typeNode)) {
       const result = [];
       for (const elementTypeNode of typeNode.types) {
-        result.push(...getAllToplevelNodeTypesInTypeNode(elementTypeNode))
+        result.push(...getAllASTTypesInTypeNode(elementTypeNode))
       }
       return result;
     }
@@ -243,7 +219,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   const getCoercions = (typeNode: ts.TypeNode): Array<[ts.TypeNode, Symbol]> => {
     const result: Array<[ts.TypeNode, Symbol]> = [];
-    for (const symbol of getAllToplevelNodeTypesInTypeNode(typeNode)) {
+    for (const symbol of getAllASTTypesInTypeNode(typeNode)) {
       const typesToCheck: Array<[ts.TypeNode, Symbol]> = [];
       const nodeTypes = getAllNodeTypesDerivingFrom(symbol)
       for (const nodeType of nodeTypes) {
@@ -344,7 +320,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
    * Declarations that should be part of the node type passed in are made
    * 'public', while the rest do not have any class modifiers. 
    */
-  function getFactoryParameters(symbol: Symbol): Array<ts.PropertySignature | ts.PropertyDeclaration | ts.ParameterDeclaration> {
+  const getFactoryParameters = memoise((symbol: Symbol): Array<ts.PropertySignature | ts.PropertyDeclaration | ts.ParameterDeclaration> => {
 
     const result: Array<ts.PropertyDeclaration | ts.PropertySignature | ts.ParameterDeclaration> = [];
 
@@ -352,12 +328,15 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
       // Find any constructor signature or declaration. If found, we will use
       // the construtor's parameters as the last parameters of this inheritance chain.
-      let constructorDeclaration = null;
       for (const declaration of inheritedSymbol.declarations) {
         assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
         const constructor = findConstructor(declaration);
         if (constructor !== null) {
-          result.push(...constructor.parameters.map(clearModifiers) as ts.ParameterDeclaration[]);
+          for (const param of constructor.parameters) {
+            result.push(inheritedSymbol === symbol
+              ? param
+              : clearModifiers(param) as ts.ParameterDeclaration);
+          }
           return false;
         }
       }
@@ -365,7 +344,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       // The curent symbol did not have a constructor, so we assume that
       // all members are added as-is to the fields of the node type.
       // We perform some small checks to make sure we have only nodes we're
-      // interested in and add the 'public' if requested.
+      // interested in and add 'public' to indicate this parameter belongs to
+      // the original symbol.
       for (const declaration of inheritedSymbol.declarations) {
         assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
         for (const member of declaration.members) {
@@ -380,7 +360,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
     return result;
 
-  }
+  }, 'id');
 
   const getAllFieldDeclarations = memoise((symbol: Symbol): Array<ts.PropertyDeclaration | ts.PropertySignature | ts.ParameterDeclaration> => {
 
@@ -406,6 +386,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         // If we found a constructor or a constructor signature, then the
         // signature serves as the list of parameters this part of the node type accepts.
         for (const param of constructorDeclaration.parameters) {
+          if (generateParentNodes && param.name.getText() === parentMemberName) {
+            continue;
+          }
           result.push(param);
         }
 
@@ -424,6 +407,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           for (const member of declaration.members) {
             if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
               implementationLimitation(ts.isIdentifier(member.name));
+              if (generateParentNodes && member.name.getText() === parentMemberName) {
+                continue;
+              }
               result.push(member);
             }
           }
@@ -441,32 +427,67 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   }, 'id');
 
   function transformHeritageClauses(heritageClauses: ts.NodeArray<ts.HeritageClause> | undefined) {
+
+    // No heritage clauses means no transformed heritage clauses.
     if (heritageClauses === undefined) {
       return []
     }
+
+    // This will contain the elements of the 'extends' and 'implements'
+    // heritage clauses, respectively.
     const extendsExprs = [];
     const implementsExprs = [];
+
     for (const heritageClause of heritageClauses) {
+
       for (const exprWithArgs of heritageClause.types) {
+
         implementationLimitation(ts.isIdentifier(exprWithArgs.expression))
+
         const symbol = resolver.resolve(exprWithArgs.expression.getText(), exprWithArgs);
-        if (symbol !== null && (symbol == rootSymbol || isAST(symbol))) {
+
+        if (symbol == null || !isAST(symbol)) {
+
+          const shouldUseImplements = symbol !== null && symbol.declarations.every(ts.isInterfaceDeclaration);
+
+          // We only get here if a declaration for the given 'extends' or
+          // 'implements' type element was not found. If this is case, we just
+          // pass trough the element to the right place.
+          if (heritageClause.token === ts.SyntaxKind.ImplementsKeyword || shouldUseImplements) {
+            implementsExprs.push(exprWithArgs);
+          } else {
+            extendsExprs.push(exprWithArgs);
+          }
+
+          continue;
+
+        }
+
+        // If the symbol refers to a declaration that was explicitly defined
+        // as a class, then we should use the 'extends' keyword. If it was an
+        // interface, we can safely skip over it.  As an exception, the root
+        // symbol always refers to a class even if it was declared as an
+        // interface.
+        if (symbol.declarations.some(ts.isClassDeclaration) || symbol === rootSymbol) {
           extendsExprs.push(
-             ts.factory.createExpressionWithTypeArguments(
+            ts.factory.createExpressionWithTypeArguments(
               ts.factory.createIdentifier(`${symbol.name}Base`),
               exprWithArgs.typeArguments
             )
           );
         } else {
-          if (heritageClause.token === ts.SyntaxKind.ImplementsKeyword
-              || (symbol !== null && symbol.declarations.every(ts.isInterfaceDeclaration))) {
-            implementsExprs.push(exprWithArgs);
-          } else {
-            extendsExprs.push(exprWithArgs);
-          }
+          extendsExprs.push(
+            ts.factory.createExpressionWithTypeArguments(
+              ts.factory.createIdentifier(`${symbol.name}Base`),
+              exprWithArgs.typeArguments
+            )
+          );
         }
+
       }
+
     }
+
     const result = []
     if (extendsExprs.length > 0) {
       result.push(
@@ -561,6 +582,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     }
     if (ts.isTypeReferenceNode(type)) {
       return ts.factory.createExpressionStatement(ts.factory.createYieldExpression(undefined, value));
+    }
+    if (isKeywordType(type)) {
+      return null;
     }
     return null;
   }
@@ -829,10 +853,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
       const parentSymbols = getAllNodeTypesHavingSymbolInField(symbol);
       const childSymbols = getAllASTInFieldsOfSymbol(symbol);
-      const membersWithAST = getAllMembers(symbol).filter(member =>
-        (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member))
-        && member.type !== undefined
-        && getAllNodeTypesInTypeNode(member.type).length > 0) as ts.PropertyDeclaration[];
+      const membersWithAST = getFactoryParameters(symbol)
+        .filter(member => hasClassModifier(member.modifiers))
+        .filter(member => getAllNodeTypesInTypeNode(member.type!).length > 0);
 
       let constructor = null;
       for (const member of node.members) {
@@ -946,7 +969,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         // }
         ts.factory.createClassDeclaration(
           undefined,
-          [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
+          node.modifiers,
           symbol.name,
           undefined,
           transformHeritageClauses(node.heritageClauses),
