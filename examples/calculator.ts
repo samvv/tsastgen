@@ -107,7 +107,15 @@ export interface Definition extends SheetElement {
   expression: Expression;
 }
 
-export interface Expression extends CalcNode {
+export class Expression extends CalcNode {
+
+  constructor(
+    public tag: string | null = null,
+    span: SourceTextSpan | null = null,
+    parentNode: CalcNode | null = null
+  ) {
+    super(span, parentNode);
+  }
 
 }
 
