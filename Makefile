@@ -5,6 +5,9 @@ all: test/calculator.ts
 .PHONY: clean
 clean:
 	rm -f test/calculator.ts
+
+.PHONY: distclean
+	$(MAKE) test/calculator.ts
 	rm -rf lib/
 	rm -rf test/lib/
 
