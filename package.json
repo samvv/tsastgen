@@ -8,7 +8,7 @@
   },
   "scripts": {
     "prepare": "tsc",
-    "test": "tsastgen examples/calculator.ts:examples/calculator-generated.ts --root-node=CalcNode && tsc -p examples"
+    "test": "tsc -p test/ && ava"
   },
   "repository": {
     "type": "git",
@@ -34,6 +34,12 @@
   },
   "devDependencies": {
     "@types/minimist": "^1.2.1",
-    "@types/node": "^14.14.31"
+    "@types/node": "^14.14.31",
+    "ava": "^3.15.0"
+  },
+  "ava": {
+    "files": [
+      "test/lib/*.test.js"
+    ]
   }
 }
