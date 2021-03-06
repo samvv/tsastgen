@@ -174,7 +174,7 @@ object.
 ### node.kind
 
 Get the `SyntaxKind` enumeration value that discriminates the type of this
-node from the other node type.
+node from the other node types.
 
 ### node.getChildNodes()
 
