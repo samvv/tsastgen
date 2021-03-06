@@ -233,6 +233,16 @@ AST node types.
 If `--root-node` is not specified, _tsastgen_ will search for a declaration
 named `Syntax`.
 
+## Known Issues and Limitations
+
+Coercions in factory functions will not always be generated because we only
+emulate a small subset the typing rule of TypeScript. If something cannot be
+checked, the tool will error or skip it. This is  due to poor support of the
+TypeScript compiler to inspect the types of AST nodes in detail. Unfortunately,
+this appears to be by design, so this won't get fixed easily. If we were to
+cover all cases of TypeScript's AST, we would effectively have written a second
+compiler.
+
 ## License
 
 I chose to license this piece of software under the MIT license, in the hope
