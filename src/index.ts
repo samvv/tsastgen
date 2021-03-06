@@ -888,6 +888,25 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         )
       )
 
+      if (parentMemberName !== null) {
+        classMembers.push(
+          // public parentNode: XParent | null = null;
+          ts.factory.createPropertyDeclaration(
+            undefined,
+            undefined,
+            parentMemberName,
+            undefined,
+            ts.factory.createUnionTypeNode([
+              ts.factory.createLiteralTypeNode(
+                ts.factory.createNull()
+              ),
+              ts.factory.createTypeReferenceNode(`${symbol.name}Parent`, undefined)
+            ]),
+            ts.factory.createNull(),
+          )
+        );
+      }
+
       if (constructor === null) {
         const constructorParameters = getFactoryParameters(symbol);
         classMembers.push(
@@ -944,27 +963,10 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         for (const member of node.members) {
           if (member.name !== undefined
               && member.name.getText() === parentMemberName) {
-            classMembers.push(
-              // public parentNode: XParent | null = null;
-              ts.factory.createPropertyDeclaration(
-                undefined,
-                undefined,
-                `parentNode`,
-                undefined,
-                ts.factory.createUnionTypeNode([
-                  ts.factory.createLiteralTypeNode(
-                    ts.factory.createNull()
-                  ),
-                  ts.factory.createTypeReferenceNode(`${symbol.name}Parent`, undefined)
-                ]),
-                ts.factory.createNull(),
-              )
-            );
-          } else {
-            classMembers.push(member);
+            continue;
           }
+          classMembers.push(member);
         }
-
       }
 
       writeNode(
