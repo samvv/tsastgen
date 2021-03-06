@@ -1,5 +1,5 @@
 
-import ts from "typescript"
+import ts, { getEffectiveConstraintOfTypeParameter } from "typescript"
 import { areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, makePublic, removeClassModifiers } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
@@ -661,7 +661,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
                       'kind'
                     ),
                     ts.factory.createPropertyAccessChain(
-                      ts.factory.createIdentifier('SyntaxKind'),
+                      ts.factory.createIdentifier(`${rootNodeName}Kind`),
                       undefined,
                       nodeTypeSymbol.name
                     )
@@ -723,7 +723,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
                       'kind'
                     ),
                     ts.factory.createPropertyAccessChain(
-                      ts.factory.createIdentifier('SyntaxKind'),
+                      ts.factory.createIdentifier(`${rootNodeName}Kind`),
                       undefined,
                       node.name
                     )
@@ -769,7 +769,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           undefined,
           undefined,
           ts.factory.createPropertyAccessChain(
-            ts.factory.createIdentifier('SyntaxKind'),
+            ts.factory.createIdentifier(`${rootNodeName}Kind`),
             undefined,
             symbol.name
           ),
@@ -951,7 +951,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
                   'kind'
                 ),
                 ts.factory.createPropertyAccessExpression(
-                  ts.factory.createIdentifier('SyntaxKind'),
+                  ts.factory.createIdentifier(`${rootNodeName}Kind`),
                   symbol.name
                 )
               )
@@ -1124,7 +1124,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
   //                 ...finalSymbols.map(nodeType => 
   //                   ts.factory.createCaseClause(
   //                     ts.factory.createPropertyAccessChain(
-  //                       ts.factory.createIdentifier('SyntaxKind'),
+  //                       ts.factory.createIdentifier(`${rootNodeName}Kind`),
   //                       undefined,
   //                       nodeType.name
   //                     ),
@@ -1224,7 +1224,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           undefined,
           'kind',
           undefined,
-          ts.factory.createTypeReferenceNode('SyntaxKind', undefined)
+          ts.factory.createTypeReferenceNode(`${rootNodeName}Kind`, undefined)
         )
       ],
       ts.factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword),
@@ -1232,7 +1232,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         ts.factory.createIfStatement(
           buildEquality(
             ts.factory.createElementAccessChain(
-              ts.factory.createIdentifier('SyntaxKind'),
+              ts.factory.createIdentifier(`${rootNodeName}Kind`),
               undefined,
               ts.factory.createIdentifier('kind')
             ),
@@ -1242,7 +1242,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         ),
         ts.factory.createReturnStatement(
           ts.factory.createElementAccessChain(
-            ts.factory.createIdentifier('SyntaxKind'),
+            ts.factory.createIdentifier(`${rootNodeName}Kind`),
             undefined,
             ts.factory.createIdentifier('kind')
           )
@@ -1305,7 +1305,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     ts.factory.createEnumDeclaration(
       undefined,
       [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
-      'SyntaxKind',
+      `${rootNodeName}Kind`,
       nodeTypes.map(nodeType => ts.factory.createEnumMember(nodeType.name)),
     )
   )
