@@ -240,8 +240,8 @@ The name of the field that is used to refer to the parent node of a node type.
 If enabled, `tsastgen` will treat this node specially and inject/replace fully
 typed member fields with the name you provided.
 
-If `--with-parent-member` is not specified, _tsastgen_ will search for a field
-member named `parentNode` in the root node type.
+If `--with-parent-member` is not specified, this feature is not enabled and
+your member will be passed through without any modifications.
 
 ## Known Issues and Limitations
 
