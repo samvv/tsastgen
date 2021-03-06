@@ -1,5 +1,5 @@
 
-import ts from "typescript"
+import ts, { isParenthesizedTypeNode } from "typescript"
 import { convertToReference, areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
@@ -7,6 +7,9 @@ import { assert, implementationLimitation, memoise } from "./util";
 
 export interface CodeGeneratorOptions {
   rootNodeName?: string;
+  parentMemberName?: string | null;
+  idMemberName?: string | null;
+  generateVisitor?: boolean;
 }
 
 function first<T1, T2>(tuple: [T1, T2]): T1 {
@@ -61,17 +64,16 @@ function buildBinaryExpression(operator: ts.BinaryOperator, args: ts.Expression[
   return result;
 }
 
-export default function generateCode(sourceFile: ts.SourceFile, options: CodeGeneratorOptions = {}): string {
+export default function generateCode(sourceFile: ts.SourceFile, {
+  idMemberName = 'id',
+  parentMemberName,
+  rootNodeName = 'Syntax',
+  generateVisitor = true,
+}: CodeGeneratorOptions = {}): string {
 
   let out = '';
 
-  const generateIdField = true;
-  const parentMemberName = 'parentNode';
-  const generateParentNodes = true;
-  const generateVisitor = true;
-  const rootNodeName = options.rootNodeName ?? 'Syntax';
   const resolver = new DeclarationResolver();
-  const declarationsToSkip = [ `${rootNodeName}Kind` ];
 
   const printer = ts.createPrinter();
 
@@ -102,7 +104,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   const isVariant = memoise((symbol: Symbol): boolean => {
     return symbol.isTypeAlias()
-        && isTypeNodeOnlyReferencingAST(symbol.asTypeAliasDeclaration().type;
+        && isTypeNodeOnlyReferencingAST(symbol.asTypeAliasDeclaration().type);
   }, 'id');
 
   const isIntermediate = memoise((symbol: Symbol): boolean => {
@@ -386,7 +388,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         // If we found a constructor or a constructor signature, then the
         // signature serves as the list of parameters this part of the node type accepts.
         for (const param of constructorDeclaration.parameters) {
-          if (generateParentNodes && param.name.getText() === parentMemberName) {
+          if (param.name.getText() === parentMemberName) {
             continue;
           }
           result.push(param);
@@ -407,7 +409,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           for (const member of declaration.members) {
             if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
               implementationLimitation(ts.isIdentifier(member.name));
-              if (generateParentNodes && member.name.getText() === parentMemberName) {
+              if (member.name.getText() === parentMemberName) {
                 continue;
               }
               result.push(member);
@@ -937,8 +939,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
       if (ts.isClassDeclaration(node)) {
         for (const member of node.members) {
-          if (generateParentNodes
-              && member.name !== undefined
+          if (member.name !== undefined
               && member.name.getText() === parentMemberName) {
             classMembers.push(
               // public parentNode: XParent | null = null;
@@ -1410,12 +1411,12 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     )
   )
 
-  if (generateParentNodes) {
+  if (parentMemberName !== null) {
     write(`
 export function setParents(node: ${rootNodeName}, parentNode: ${rootNodeName} | null = null): void {
   // We cast to any here because parentNode is strongly typed and not generic
   // enough to accept arbitrary AST nodes
-  node.parentNode = parentNode as any;
+  (node as any).${parentMemberName} = parentNode;
   for (const childNode of node.getChildNodes()) {
     setParents(childNode, node);
   }
