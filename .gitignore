@@ -8,7 +8,8 @@ tsastgen-*.tgz
 
 # compiled JavaScript/TypeScript
 lib/
-examples/*-generated.ts
+test/*.ts
+!test/*.test.ts
 
 # additional local development files
 Makefile
