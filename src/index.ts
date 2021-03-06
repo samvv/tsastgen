@@ -1,5 +1,5 @@
 
-import ts, { isParenthesizedTypeNode } from "typescript"
+import ts from "typescript"
 import { convertToReference, areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
@@ -66,7 +66,7 @@ function buildBinaryExpression(operator: ts.BinaryOperator, args: ts.Expression[
 
 export default function generateCode(sourceFile: ts.SourceFile, {
   idMemberName = 'id',
-  parentMemberName,
+  parentMemberName = null,
   rootNodeName = 'Syntax',
   generateVisitor = true,
 }: CodeGeneratorOptions = {}): string {
@@ -131,7 +131,13 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       return symbol.allExtendsTo.filter(otherSymbol => isNodeType(otherSymbol))
     }
     if (isVariant(symbol)) {
-      return getAllNodeTypesInTypeNode(symbol.asTypeAliasDeclaration().type)
+      const result = new Set<Symbol>();
+      for (const referencedSymbol of getAllNodeTypesInTypeNode(symbol.asTypeAliasDeclaration().type)) {
+        for (const derivedSymbol of getAllNodeTypesDerivingFrom(referencedSymbol)) {
+          result.add(derivedSymbol)
+        }
+      }
+      return [...result];
     }
     return [];
   }, 'id');
@@ -751,7 +757,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
               undefined,
               'value',
               undefined,
-              ts.factory.createTypeReferenceNode(symbol.name)
+              ts.factory.createTypeReferenceNode(rootNodeName)
             )
           ],
           ts.factory.createTypePredicateNode(
@@ -791,9 +797,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
 
       writeNode(node);
 
-      const finalNodes = resolver.getReferencedSymbolsInTypeNode(symbol.asTypeAliasDeclaration().type)
-        .filter(symbol => isNodeType(symbol) || isVariant(symbol));
-
       // export function isY(value: any): value is Y {
       //   return value.kind === SyntaxKind.A
       //       || value.kind === SyntaxKind.B
@@ -813,7 +816,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
               undefined,
               'value',
               undefined,
-              ts.factory.createTypeReferenceNode(symbol.name)
+              ts.factory.createTypeReferenceNode(rootNodeName)
             )
           ],
           ts.factory.createTypePredicateNode(
@@ -825,7 +828,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
             ts.factory.createReturnStatement(
               buildBinaryExpression(
                 ts.SyntaxKind.BarBarToken,
-                finalNodes.map(node => 
+                getAllNodeTypesDerivingFrom(symbol).map(node => 
                   buildEquality(
                     ts.factory.createPropertyAccessChain(
                       ts.factory.createIdentifier('value'),
