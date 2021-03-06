@@ -11,6 +11,3 @@ lib/
 test/*.ts
 !test/*.test.ts
 
-# additional local development files
-Makefile
-
