@@ -1,6 +1,6 @@
 
-import ts, { getEffectiveConstraintOfTypeParameter } from "typescript"
-import { areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, makePublic, removeClassModifiers } from "./helpers";
+import ts from "typescript"
+import { convertToReference, areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
 import { assert, implementationLimitation, memoise } from "./util";
@@ -112,13 +112,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     return result;
   }, 'id');
 
-  const isTypeNodeOnlyReferencingAST = (node: ts.Node): boolean => {
+  const isTypeNodeOnlyReferencingAST = (node: ts.TypeNode): boolean => {
     if (ts.isUnionTypeNode(node)) {
       return node.types.every(isTypeNodeOnlyReferencingAST);
     }
     if (ts.isTypeReferenceNode(node)) {
       const symbol = resolver.resolveTypeReferenceNode(node);
-      return symbol !== null && (isAST(symbol));
+      return symbol !== null && isAST(symbol);
     }
     return false;
   }
@@ -214,9 +214,9 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
   const getAllASTInFieldsOfSymbol = memoise((symbol: Symbol) => {
     const result = new Set<Symbol>();
-    for (const param of getFieldsAsParameters(symbol)) {
-      if (param.type !== undefined) {
-        for (const referencedSymbol of resolver.getReferencedSymbolsInTypeNode(param.type)) {
+    for (const declaration of getAllFieldDeclarations(symbol)) {
+      if (declaration.type !== undefined) {
+        for (const referencedSymbol of resolver.getReferencedSymbolsInTypeNode(declaration.type)) {
           if (isAST(referencedSymbol)) {
             result.add(referencedSymbol);
           }
@@ -241,13 +241,13 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     return result;
   }, 'id');
 
-  const getAutoCasts = (typeNode: ts.TypeNode): Array<[ts.TypeNode, Symbol]> => {
+  const getCoercions = (typeNode: ts.TypeNode): Array<[ts.TypeNode, Symbol]> => {
     const result: Array<[ts.TypeNode, Symbol]> = [];
     for (const symbol of getAllToplevelNodeTypesInTypeNode(typeNode)) {
       const typesToCheck: Array<[ts.TypeNode, Symbol]> = [];
       const nodeTypes = getAllNodeTypesDerivingFrom(symbol)
       for (const nodeType of nodeTypes) {
-        const requiredParameters = getFieldsAsParameters(nodeType).filter(p => p.questionToken === undefined && p.initializer === undefined)
+        const requiredParameters = getFactoryParameters(nodeType).filter(p => p.questionToken === undefined && p.initializer === undefined)
         if (requiredParameters.length === 1) {
           const uniqueParameter = requiredParameters[0];
           if (uniqueParameter.type === undefined) {
@@ -263,7 +263,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     return result;
   }
 
-  function addAutoCastsToParameter(param: ts.ParameterDeclaration) {
+  function addCoercionsToParameter(param: ts.ParameterDeclaration) {
     return ts.factory.createParameterDeclaration(
       param.decorators,
       param.modifiers,
@@ -271,111 +271,36 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       param.name,
       param.questionToken,
       param.type !== undefined
-        ? ts.factory.createUnionTypeNode([param.type, ...getAutoCasts(param.type).map(([typeNode, symbol]) => typeNode)])
+        ? ts.factory.createUnionTypeNode([param.type, ...getCoercions(param.type).map(([typeNode, symbol]) => typeNode)])
         : undefined,
       param.initializer
     )
   }
 
-  function getFieldsAsParameters(symbol: Symbol, isConstructor = false): Array<ts.ParameterDeclaration> {
-
-    const result: Array<ts.ParameterDeclaration> = [];
-
-    const visitSymbol = (currSymbol: Symbol, onlyOptional: boolean, ownMember: boolean) => {
-
-      // Find any constructor signature or declaration. If found, we will use
-      // the parameters of this constructor as the parameters that should be
-      // returned by this function.
-      let constructorDeclaration = null;
-      for (const declaration of currSymbol.declarations) {
-        assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
-        const constructor = findConstructor(declaration);
-        if (constructor !== null) {
-          constructorDeclaration = constructor;
-          break;
-        }
-      }
-
-      if (constructorDeclaration !== null) {
-
-        // If we found a constructor or a constructor signature, then the
-        // signature serves as the list of parameters this node type accepts.
-        // We perform some small checks to make sure we have only nodes we're
-        // interested in and add the 'public' if requested.
-        for (const param of constructorDeclaration.parameters) {
-          if ((param.questionToken !== undefined || param.initializer !== undefined) === onlyOptional) {
-            result.push(
-              ts.factory.createParameterDeclaration(
-                param.decorators,
-                isConstructor && ownMember ? makePublic(param.modifiers) : removeClassModifiers(param.modifiers),
-                param.dotDotDotToken,
-                param.name,
-                param.questionToken,
-                param.type,
-                param.initializer
-              )
-            );
-          }
-        }
-
-        // A constructor should contain all parameters of all the base
-        // classes, so we shouldn't contiue with searching for more.
-        return false;
-
-      } else {
-
-        // The curent symbol did not have a constructor, so we assume that
-        // all members are added as-is to the fields of the node type.
-        // We perform some small checks to make sure we have only nodes we're
-        // interested in and add the 'public' if requested.
-        for (const declaration of currSymbol.declarations) {
-          assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
-          for (const member of declaration.members) {
-            if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
-              implementationLimitation(ts.isIdentifier(member.name));
-              if ((member.questionToken !== undefined || member.initializer !== undefined) === onlyOptional) {
-                result.push(
-                  ts.factory.createParameterDeclaration(
-                    member.decorators,
-                    isConstructor && ownMember ? makePublic(member.modifiers) : removeClassModifiers(member.modifiers),
-                    undefined,
-                    member.name,
-                    member.questionToken,
-                    member.type,
-                    member.initializer
-                  )
-                );
-              }
-            }
-          }
-        }
-
-      }
-
-      // If we got here there were no early returns indicating that the visitor
-      // should stop visiting the current inheritance chain. Just signal the visitor
-      // that it may continue.
-      return true;
-    }
+  /**
+   * Visits all inheritance chains of the given symbol one-by-one and skip the
+   * current chain if the visitor returned false.
+   */
+  function visitInheritanceChains(symbol: Symbol, visit: (inheritedSymbol: Symbol) => boolean | void) {
 
     const inheritanceChains: Symbol[][] = [];
 
-    const generateInheritanceChains = (symbol: Symbol, path: Symbol[]) => {
+    const generateInheritanceChains = (symbol: Symbol, currChain: Symbol[]) => {
       if (symbol.inheritsFrom.length === 0) {
-        inheritanceChains.push(path);
+        inheritanceChains.push(currChain);
       }
       for (const inheritedSymbol of symbol.inheritsFrom) {
-        generateInheritanceChains(inheritedSymbol, [...path, inheritedSymbol ])
+        generateInheritanceChains(inheritedSymbol, [...currChain, inheritedSymbol ])
       }
     }
 
     generateInheritanceChains(symbol, [ symbol ]);
 
-    const visitBottomUp = (onlyOptional = false) => {
+    const visitBottomUp = () => {
 
       // First we visit the symbol itself and add any members we're interested
       // in to the result.
-      if (!visitSymbol(symbol, onlyOptional, true)) {
+      if (visit(symbol) === false) {
         return;
       }
 
@@ -400,16 +325,165 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
             break;
           }
           visited.add(inheritedSymbol);
-          if (!visitSymbol(inheritedSymbol, onlyOptional, ownMembers)) {
+          if (!visit(inheritedSymbol)) {
             break;
+          }
+        }
+
+      }
+
+    }
+
+    visitBottomUp();
+
+  }
+
+  /**
+   * Finds all declarations that would be required when constructing the given node type.
+   * 
+   * Declarations that should be part of the node type passed in are made
+   * 'public', while the rest do not have any class modifiers. 
+   */
+  function getFactoryParameters(symbol: Symbol): Array<ts.PropertySignature | ts.PropertyDeclaration | ts.ParameterDeclaration> {
+
+    const result: Array<ts.PropertyDeclaration | ts.PropertySignature | ts.ParameterDeclaration> = [];
+
+    visitInheritanceChains(symbol, (inheritedSymbol: Symbol) => {
+
+      // Find any constructor signature or declaration. If found, we will use
+      // the construtor's parameters as the last parameters of this inheritance chain.
+      let constructorDeclaration = null;
+      for (const declaration of inheritedSymbol.declarations) {
+        assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
+        const constructor = findConstructor(declaration);
+        if (constructor !== null) {
+          result.push(...constructor.parameters.map(clearModifiers) as ts.ParameterDeclaration[]);
+          return false;
+        }
+      }
+
+      // The curent symbol did not have a constructor, so we assume that
+      // all members are added as-is to the fields of the node type.
+      // We perform some small checks to make sure we have only nodes we're
+      // interested in and add the 'public' if requested.
+      for (const declaration of inheritedSymbol.declarations) {
+        assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
+        for (const member of declaration.members) {
+          if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
+            implementationLimitation(ts.isIdentifier(member.name));
+            result.push(makePublic(member) as ts.PropertySignature | ts.PropertyDeclaration);
+          }
+        }
+      }
+
+    });
+
+    return result;
+
+  }
+
+  const getAllFieldDeclarations = memoise((symbol: Symbol): Array<ts.PropertyDeclaration | ts.PropertySignature | ts.ParameterDeclaration> => {
+
+    const result: Array<ts.PropertyDeclaration| ts.PropertySignature | ts.ParameterDeclaration> = [];
+
+    visitInheritanceChains(symbol, (currSymbol: Symbol) => {
+
+      // Find any constructor signature or declaration. If found, we will use
+      // the parameters of this constructor as the parameters that should be
+      // returned by this function.
+      let constructorDeclaration = null;
+      for (const declaration of currSymbol.declarations) {
+        assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
+        const constructor = findConstructor(declaration);
+        if (constructor !== null) {
+          constructorDeclaration = constructor;
+          break;
+        }
+      }
+
+      if (constructorDeclaration !== null) {
+
+        // If we found a constructor or a constructor signature, then the
+        // signature serves as the list of parameters this part of the node type accepts.
+        for (const param of constructorDeclaration.parameters) {
+          result.push(param);
+        }
+
+        // A constructor should contain all parameters of all the base
+        // classes, so we shouldn't contiue with searching for more base classes.
+        return false;
+
+      } else {
+
+        // The curent symbol did not have a constructor, so we assume that
+        // all members are added as-is to the fields of the node type.
+        // We perform some small checks to make sure we have only nodes we're
+        // interested in and add the 'public' if requested.
+        for (const declaration of currSymbol.declarations) {
+          assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
+          for (const member of declaration.members) {
+            if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) {
+              implementationLimitation(ts.isIdentifier(member.name));
+              result.push(member);
+            }
+          }
+        }
+
+      }
+
+    });
+
+    return [
+      ...result.filter(node => node.questionToken === undefined && node.initializer === undefined),
+      ...result.filter(node => node.questionToken !== undefined || node.initializer !== undefined)
+    ];
+
+  }, 'id');
+
+  function transformHeritageClauses(heritageClauses: ts.NodeArray<ts.HeritageClause> | undefined) {
+    if (heritageClauses === undefined) {
+      return []
+    }
+    const extendsExprs = [];
+    const implementsExprs = [];
+    for (const heritageClause of heritageClauses) {
+      for (const exprWithArgs of heritageClause.types) {
+        implementationLimitation(ts.isIdentifier(exprWithArgs.expression))
+        const symbol = resolver.resolve(exprWithArgs.expression.getText(), exprWithArgs);
+        if (symbol !== null && (symbol == rootSymbol || isAST(symbol))) {
+          extendsExprs.push(
+             ts.factory.createExpressionWithTypeArguments(
+              ts.factory.createIdentifier(`${symbol.name}Base`),
+              exprWithArgs.typeArguments
+            )
+          );
+        } else {
+          if (heritageClause.token === ts.SyntaxKind.ImplementsKeyword
+              || (symbol !== null && symbol.declarations.every(ts.isInterfaceDeclaration))) {
+            implementsExprs.push(exprWithArgs);
+          } else {
+            extendsExprs.push(exprWithArgs);
           }
         }
       }
     }
-
-    visitBottomUp(false);
-    visitBottomUp(true);
-
+    const result = []
+    if (extendsExprs.length > 0) {
+      result.push(
+        ts.factory.createHeritageClause(
+          ts.SyntaxKind.ExtendsKeyword,
+          extendsExprs
+        )
+      )
+    }
+    if (implementsExprs.length > 0) {
+      result.push(
+        ts.factory.createHeritageClause(
+          ts.SyntaxKind.ImplementsKeyword,
+          implementsExprs
+        )
+      )
+    }
     return result;
   }
 
@@ -553,11 +627,6 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
     throw new Error(`The root node '${rootNodeName}' must be a class or interface declaration.`)
   }
 
-  function parameterToReference(param: ts.ParameterDeclaration): ts.Identifier {
-    implementationLimitation(ts.isIdentifier(param.name));
-    return param.name;
-  }
-
   const nodeTypes = [...resolver.getAllSymbols()].filter(isNodeType);
 
   const generate = (node: ts.Node) => {
@@ -606,6 +675,21 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
 
       const nodeTypes = symbol.allExtendsTo.filter(isNodeType)
 
+      implementationLimitation(node.name !== undefined)
+      // export class XBase extends ... {
+      //   ...
+      // }
+      writeNode(
+        ts.factory.createClassDeclaration(
+          node.decorators,
+          node.modifiers,
+          `${node.name.getText()}Base`,
+          node.typeParameters,
+          transformHeritageClauses(node.heritageClauses),
+          ts.isClassDeclaration(node) ? node.members : [],
+        )
+      )
+
       // export type X
       //   = A
       //   | B
@@ -641,7 +725,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
               undefined,
               'value',
               undefined,
-              ts.factory.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)
+              ts.factory.createTypeReferenceNode(symbol.name)
             )
           ],
           ts.factory.createTypePredicateNode(
@@ -703,7 +787,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
               undefined,
               'value',
               undefined,
-              ts.factory.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)
+              ts.factory.createTypeReferenceNode(symbol.name)
             )
           ],
           ts.factory.createTypePredicateNode(
@@ -777,21 +861,21 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
       )
 
       if (constructor === null) {
-        const constructorParameters = getFieldsAsParameters(symbol, true);
+        const constructorParameters = getFactoryParameters(symbol);
         classMembers.push(
           // constructor(public field: T, ...) { super(field...) }
           ts.factory.createConstructorDeclaration(
             undefined,
             undefined,
             [
-              ...constructorParameters,
+              ...constructorParameters.map(convertToParameter),
             ],
             ts.factory.createBlock([
               ts.factory.createExpressionStatement(
                 ts.factory.createCallExpression(
                   ts.factory.createSuper(),
                   undefined,
-                  constructorParameters.filter(param => !hasClassModifier(param.modifiers)).map(parameterToReference)
+                  constructorParameters.filter(param => !hasClassModifier(param.modifiers)).map(convertToReference)
                 )
               )
             ])
@@ -853,6 +937,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
             classMembers.push(member);
           }
         }
+
       }
 
       writeNode(
@@ -864,17 +949,7 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
           symbol.name,
           undefined,
-          [
-            ts.factory.createHeritageClause(
-              ts.SyntaxKind.ExtendsKeyword,
-              [
-                ts.factory.createExpressionWithTypeArguments(
-                  ts.factory.createIdentifier(`${rootNodeName}Base`),
-                  undefined,
-                )
-              ]
-            )
-          ],
+          transformHeritageClauses(node.heritageClauses),
           classMembers,
         )
       );
@@ -918,8 +993,10 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
         )
       );
 
-      const factoryParameters = getFieldsAsParameters(symbol)
-      const autoCastStatements = [];
+      const factoryParameters = getFactoryParameters(symbol)
+        .map(convertToParameter)
+        .map(clearModifiers) as ts.ParameterDeclaration[];
+      const coercionStatements = [];
 
       // function isX(value: any) {
       //   return value.kind === SyntaxKind.X;
@@ -965,8 +1042,8 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           continue;
         }
         implementationLimitation(ts.isIdentifier(param.name));
-        for (const [typeToCastFrom, nodeType]  of getAutoCasts(param.type)) {
-          autoCastStatements.push(
+        for (const [typeToCastFrom, nodeType]  of getCoercions(param.type)) {
+          coercionStatements.push(
             ts.factory.createIfStatement(
               buildPredicateFromTypeNode(typeToCastFrom, param.name),
               ts.factory.createExpressionStatement(
@@ -997,16 +1074,16 @@ export default function generateCode(sourceFile: ts.SourceFile, options: CodeGen
           `create${symbol.name}`,
           undefined,
           [
-            ...factoryParameters.map(addAutoCastsToParameter),
+            ...factoryParameters.map(addCoercionsToParameter),
           ],
           ts.factory.createTypeReferenceNode(symbol.name, undefined),
           ts.factory.createBlock([
-            ...autoCastStatements,
+            ...coercionStatements,
             ts.factory.createReturnStatement(
               ts.factory.createNewExpression(
                 ts.factory.createIdentifier(symbol.name),
                 undefined,
-                factoryParameters.map(parameterToReference)
+                factoryParameters.map(convertToReference)
               )
             )
           ])

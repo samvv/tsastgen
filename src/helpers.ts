@@ -1,6 +1,6 @@
 
-import ts from "typescript"
-import { implementationLimitation } from "./util";
+import ts, { ModifiersArray } from "typescript"
+import { assert, implementationLimitation } from "./util";
 
 /**
  * Merges two modifier lists together so that there are no duplicates.
@@ -120,7 +120,7 @@ export function hasClassModifier(modifiers: ts.ModifiersArray | undefined): bool
 /**
  * Adds the public class modifier if no class modifier has been specified yet.
  */
-export function makePublic(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
+export function addPublicModifier(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
   if (modifiers === undefined) {
     return ts.factory.createNodeArray([
       ts.factory.createModifier(ts.SyntaxKind.PublicKeyword)
@@ -134,6 +134,32 @@ export function makePublic(modifiers: ts.ModifiersArray | undefined): ts.Modifie
   const newModifiers = [...modifiers];
   newModifiers.unshift(ts.factory.createModifier(ts.SyntaxKind.PublicKeyword));
   return ts.factory.createNodeArray(modifiers);
+}
+
+export function makePublic(node: ts.ParameterDeclaration | ts.ClassElement | ts.TypeElement) {
+  if (hasClassModifier(node.modifiers)) {
+    return node;
+  }
+  if (ts.isParameter(node)) {
+    return ts.factory.createParameterDeclaration(
+      node.decorators,
+      addPublicModifier(node.modifiers),
+      node.dotDotDotToken,
+      node.name,
+      node.questionToken,
+      node.type,
+      node.initializer
+    )
+  }
+  if (ts.isPropertySignature(node)) {
+    return ts.factory.createPropertySignature(
+      addPublicModifier(node.modifiers),
+      node.name,
+      node.questionToken,
+      node.type
+    )
+  }
+  throw new Error(`Could not make a ${ts.SyntaxKind[node.kind]} public: node type not supported.`);
 }
 
 /**
@@ -285,6 +311,48 @@ export function convertToClassElement(node: ts.Node): ts.ClassElement | null {
   return null;
 }
 
+export function clearModifiers(node: ts.Node): ts.Node {
+  if (ts.isParameter(node)) {
+    return ts.factory.createParameterDeclaration(
+      node.decorators,
+      undefined,
+      node.dotDotDotToken,
+      node.name,
+      node.questionToken,
+      node.type,
+      node.initializer
+    )
+  }
+  throw new Error(`Could not clear modifiers of a ${ts.SyntaxKind[node.kind]}: unsupported node type`)
+}
+
+export function convertToReference(node: ts.Node): ts.Identifier {
+  if (ts.isParameter(node) || ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
+    implementationLimitation(ts.isIdentifier(node.name));
+    return node.name;
+  }
+  throw new Error(`Could not convert a ${ts.SyntaxKind[node.kind]} to a variable reference: unsupported nod type`)
+}
+
+export function convertToParameter(node: ts.Node): ts.ParameterDeclaration { 
+  if (ts.isParameter(node)) {
+    return node;
+  }
+  if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
+    assert(ts.isBindingName(node.name))
+    return ts.factory.createParameterDeclaration(
+      node.decorators,
+      node.modifiers,
+      undefined,
+      node.name,
+      node.questionToken,
+      node.type,
+      node.initializer
+    )
+  }
+  throw new Error(`Could not convert a ${ts.SyntaxKind[node.kind]} to a parameter declaration: unsupported node type`)
+}
+
 /**
  * Checks whether the given node is exported out of the source file through the export keyword.
  * 
@@ -295,4 +363,9 @@ export function isNodeExported(node: ts.Node): boolean {
     (ts.getCombinedModifierFlags(node as ts.Declaration) & ts.ModifierFlags.Export) !== 0 ||
     (!!node.parent && node.parent.kind === ts.SyntaxKind.SourceFile)
   );
+}
+
+export function isSuperCall(node: ts.Node): node is ts.CallExpression {
+  return ts.isCallExpression(node)
+      && node.expression.kind === ts.SyntaxKind.SuperKeyword
 }
