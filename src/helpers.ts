@@ -216,7 +216,7 @@ export function isKeywordType(typeNode: ts.TypeNode): boolean {
  */
 export function isTypeAssignableTo(a: ts.TypeNode, b: ts.TypeNode): boolean {
   if (ts.isTypeReferenceNode(a) && ts.isTypeReferenceNode(b)) {
-    if (a.typeName !== b.typeName) {
+    if (a.typeName.getText() !== b.typeName.getText()) {
       return false;
     }
     if (a.typeArguments === undefined || b.typeArguments === undefined) {
@@ -225,7 +225,7 @@ export function isTypeAssignableTo(a: ts.TypeNode, b: ts.TypeNode): boolean {
     return a.typeArguments.every((typeArg, i) => isTypeAssignableTo(typeArg, b.typeArguments![i]))
   }
   if (ts.isUnionTypeNode(b)) {
-    return b.types.some(type => isTypeAssignableTo(a, type))
+    return b.types.every(type => isTypeAssignableTo(a, type))
   }
   if (ts.isUnionTypeNode(a)) {
     return a.types.some(type => isTypeAssignableTo(type, b))
@@ -236,12 +236,18 @@ export function isTypeAssignableTo(a: ts.TypeNode, b: ts.TypeNode): boolean {
     }
     return isTypeAssignableTo(a.elementType, b.elementType);
   }
-  // if (ts.isLiteralTypeNode(a) || ts.isLiteralTypeNode(b)) {
-  //   if (!(ts.isLiteralTypeNode(a) && ts.isLiteralTypeNode(b))) {
-  //     return false;
-  //   }
-  //   return a.literal.kind === b.literal.kind;
-  // }
+  if (ts.isParenthesizedTypeNode(a)) {
+    return isTypeAssignableTo(a.type, b);
+  }
+  if (ts.isParenthesizedTypeNode(b)) {
+    return isTypeAssignableTo(a, b.type);
+  }
+  if (ts.isLiteralTypeNode(a) || ts.isLiteralTypeNode(b)) {
+    if (!(ts.isLiteralTypeNode(a) && ts.isLiteralTypeNode(b))) {
+      return false;
+    }
+    throw new Error(`Could not check equivalence of two literal types: equality not supported.`);
+  }
   if (isKeywordType(a) || isKeywordType(b)) {
     if (!(isKeywordType(a) && isKeywordType(b))) {
       return false;
@@ -249,6 +255,90 @@ export function isTypeAssignableTo(a: ts.TypeNode, b: ts.TypeNode): boolean {
     return a.kind === b.kind;
   }
   throw new Error(`Could not check assignablility of the two types ${ts.SyntaxKind[a.kind]} and ${ts.SyntaxKind[b.kind]}. Support for type-checking is very limited right now.`);
+}
+
+export function isArrayType(typeNode: ts.TypeNode) {
+  return ts.isArrayTypeNode(typeNode)
+    || (ts.isTypeReferenceNode(typeNode)
+      && typeNode.typeArguments !== undefined
+      && typeNode.typeName.getText() === 'Array');
+}
+
+export function getArrayElementType(typeNode: ts.TypeNode) {
+  if (ts.isArrayTypeNode(typeNode)) {
+    return typeNode.elementType;
+  }
+  if (ts.isTypeReferenceNode(typeNode)) {
+    assert(typeNode.typeName.getText() === 'Array');
+    assert(typeNode.typeArguments !== undefined);
+    return typeNode.typeArguments[0];
+  }
+  throw new Error(`Could not get the element type of the given TypeScript type node: unrecognised type node`);
+}
+
+export function doTypesOverlap(a: ts.TypeNode, b: ts.TypeNode): boolean {
+  if (isArrayType(a) && isArrayType(b)) {
+    return doTypesOverlap(getArrayElementType(a), getArrayElementType(b));
+  }
+  if (isArrayType(a) || isArrayType(b)) {
+    return false;
+  }
+  if (ts.isTypeReferenceNode(a) && ts.isTypeReferenceNode(b)) {
+    // FIXME resolve type aliases
+    if (a.typeName.getText() !== b.typeName.getText()) {
+      return false;
+    }
+    if (a.typeArguments === undefined || b.typeArguments === undefined) {
+      return false;
+    }
+    return a.typeArguments.some((typeArg, i) => doTypesOverlap(typeArg, b.typeArguments![i]))
+  }
+  if (ts.isUnionTypeNode(b)) {
+    console.log(a);
+    return b.types.some(type => doTypesOverlap(a, type))
+  }
+  if (ts.isUnionTypeNode(a)) {
+    return a.types.some(type => doTypesOverlap(type, b))
+  }
+  if (ts.isParenthesizedTypeNode(a)) {
+    return doTypesOverlap(a.type, b);
+  }
+  if (ts.isParenthesizedTypeNode(b)) {
+    return doTypesOverlap(a, b.type);
+  }
+  if (ts.isLiteralTypeNode(a) && ts.isLiteralTypeNode(b)) {
+    if (a.literal.kind === ts.SyntaxKind.NullKeyword && b.literal.kind === ts.SyntaxKind.NullKeyword) {
+      return true;
+    }
+    if (a.literal.kind === ts.SyntaxKind.UndefinedKeyword && b.literal.kind === ts.SyntaxKind.UndefinedKeyword) {
+      return true;
+    }
+    throw new Error(`Could not compare literal types. Support for type-checkin is very limited right now.`);
+  }
+  if (ts.isLiteralTypeNode(a)) {
+    if (a.literal.kind === ts.SyntaxKind.StringLiteral
+      && b.kind === ts.SyntaxKind.StringLiteral) {
+      return true;
+    }
+    if (a.literal.kind === ts.SyntaxKind.TrueKeyword && b.kind === ts.SyntaxKind.BooleanKeyword) {
+      return true;
+    }
+    if (a.literal.kind === ts.SyntaxKind.FalseKeyword && b.kind === ts.SyntaxKind.BooleanKeyword) {
+      return true;
+    }
+    // FIXME Cover more cases.
+    return false;
+  }
+  if (ts.isLiteralTypeNode(b)) {
+    return doTypesOverlap(b, a);
+  }
+  if (isKeywordType(a) || isKeywordType(b)) {
+    if (!(isKeywordType(a) && isKeywordType(b))) {
+      return false;
+    }
+    return a.kind === b.kind;
+  }
+  throw new Error(`Could not determine if the two types ${ts.SyntaxKind[a.kind]} and ${ts.SyntaxKind[b.kind]} overlap. Support for type-checking is very limited right now.`);
 }
 
 /**

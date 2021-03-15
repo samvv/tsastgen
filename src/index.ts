@@ -1,6 +1,6 @@
 
 import ts from "typescript"
-import { convertToReference, areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers } from "./helpers";
+import { convertToReference, areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers, doTypesOverlap } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
 import { assert, implementationLimitation, memoise } from "./util";
@@ -11,6 +11,8 @@ export interface CodeGeneratorOptions {
   idMemberName?: string | null;
   generateVisitor?: boolean;
 }
+
+type Coercion = [ts.TypeNode, Symbol];
 
 function first<T1, T2>(tuple: [T1, T2]): T1 {
   return tuple[0];
@@ -225,23 +227,102 @@ export default function generateCode(sourceFile: ts.SourceFile, {
     return result;
   }, 'id');
 
-  const getCoercions = (typeNode: ts.TypeNode): Array<[ts.TypeNode, Symbol]> => {
-    const result: Array<[ts.TypeNode, Symbol]> = [];
-    for (const symbol of getAllASTTypesInTypeNode(typeNode)) {
-      const typesToCheck: Array<[ts.TypeNode, Symbol]> = [];
-      const nodeTypes = getAllNodeTypesDerivingFrom(symbol)
-      for (const nodeType of nodeTypes) {
-        const requiredParameters = getFactoryParameters(nodeType).filter(p => p.questionToken === undefined && p.initializer === undefined)
-        if (requiredParameters.length === 1) {
-          const uniqueParameter = requiredParameters[0];
-          if (uniqueParameter.type === undefined) {
-            continue;
+  function *expandUnionTypes(typeNode: ts.TypeNode): Generator<ts.TypeNode> {
+    if (ts.isUnionTypeNode(typeNode)) {
+      for (const type of typeNode.types) {
+        yield* expandUnionTypes(type);
+      }
+    } else {
+      yield typeNode;
+    }
+  }
+
+  const referencesSelfInFields = memoise((symbol: Symbol) => {
+    const candidates = getAllNodeTypesDerivingFrom(symbol);
+    for (const derivedSymbol of candidates) {
+      for (const astSymbol of getAllASTInFieldsOfSymbol(derivedSymbol)) {
+        for (const nodeType of getAllNodeTypesDerivingFrom(astSymbol)) {
+          if (candidates.indexOf(nodeType) !== -1) {
+            return false;
           }
-          typesToCheck.push([uniqueParameter.type, nodeType])
         }
       }
-      if (areTypesDisjoint(typesToCheck.map(first))) {
-        result.push(...typesToCheck);
+    }
+    return true;
+  }, 'id');
+
+  const getCoercions = (typeNode: ts.TypeNode): Array<[ts.TypeNode, Symbol]> => {
+
+    // Get all node types that are referenced inside the type node so that we
+    // are able to fetch their fields later on.
+    const nodeTypes: Symbol[] = [];
+    for (const astSymbol of getAllASTTypesInTypeNode(typeNode)) {
+      for (const nodeType of getAllNodeTypesDerivingFrom(astSymbol)) {
+        nodeTypes.push(nodeType);
+      }
+    }
+
+    // This array will contain all valid coercions at the end of the next loop.
+    const result: Coercion[] = [];
+
+    for (const nodeType of nodeTypes) {
+
+      // Get all non-optional parameters that we could instanciate the type with.
+      // If we found exactly one, the field can be coerced into `nodeType`.
+      const requiredParameters = getFactoryParameters(nodeType)
+        .filter(p => p.questionToken === undefined && p.initializer === undefined)
+
+      if (requiredParameters.length === 1) {
+
+        const uniqueParameter = requiredParameters[0];
+
+        // This is just a failsafe for the weird case when the type of the
+        // field has been set to `any`.
+        if (uniqueParameter.type === undefined) {
+          continue;
+        }
+
+        outer: for (const typeNode of expandUnionTypes(uniqueParameter.type)) {
+
+          // It does not make sense to create a coercion for a certain type if
+          // that type is the same as the type the field accepts by default.
+          // This variable will be set to `true` whenever a coercion would
+          // overlap with the field itself.
+          const referencesSelf = getAllASTTypesInTypeNode(typeNode)
+            .some(referenced => {
+              const referencedNodeTypes = getAllNodeTypesDerivingFrom(referenced);
+              for (const nodeType of nodeTypes) {
+                if (referencedNodeTypes.indexOf(nodeType) !== -1) {
+                  return true;
+                }
+              }
+              return false;
+            });
+
+          if (referencesSelf) {
+            continue;
+          }
+
+          for (let i = 0; i < result.length; i++) {
+
+            const [otherTypeNode, _] = result[i];
+
+            // If two types overlap then both must be removed from the list of
+            // coercions. In order to remove the first type, we just skip
+            // adding it. The second type we have to manually remove from the
+            // list.
+            if (doTypesOverlap(typeNode, otherTypeNode)) {
+              result.splice(i, 1);
+              continue outer;
+            }
+
+          }
+
+          // Every check passed if we got this far. Add the coercion to the
+          // list of coercions. Note that the coercion might still get removed
+          // by one of the next type nodes we visit.
+          result.push([typeNode, nodeType])
+        }
       }
     }
     return result;
@@ -644,6 +725,8 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           return buildTypeOfEquality(value, ts.factory.createStringLiteral('boolean'));
         case ts.SyntaxKind.NumberKeyword:
           return buildTypeOfEquality(value, ts.factory.createStringLiteral('number'));
+        case ts.SyntaxKind.BigIntKeyword:
+          return buildTypeOfEquality(value, ts.factory.createStringLiteral('bigint'));
       }
     }
     throw new Error(`Could not convert TypeScript type node to a type guard.`)
@@ -663,7 +746,119 @@ export default function generateCode(sourceFile: ts.SourceFile, {
 
   const generate = (node: ts.Node) => {
 
+    // Skip any type alias that declares 'SyntaxKind' 
+    //if (ts.isTypeAliasDeclaration(node) && node.name.getText() === `${rootNodeName}Kind`) {
+    //  return;
+    //}
+
     if (node === rootDeclaration) {
+
+      const newMembers = rootDeclaration.members.map((decl: ts.ClassElement | ts.TypeElement) => {
+        const classElement = convertToClassElement(decl);
+        implementationLimitation(classElement !== null);
+        return classElement;
+      });
+
+      if (parentMemberName !== null) {
+        // public getParentOfKind<K extends SytaxKind>(kind: K): (Syntax & { kind: K }) | null {
+        //   let currNode = this.parentNode;
+        //   while (currNode !== null) {
+        //     if (currNode.kind === kind) {
+        //       return currNode;
+        //     }
+        //     currNode = currNode.parentNode;
+        //   }
+        //   return null;
+        // }
+        newMembers.push(
+          ts.factory.createMethodDeclaration(
+            undefined,
+            undefined,
+            undefined,
+            'getParentOfKind',
+            undefined,
+            [
+              ts.factory.createTypeParameterDeclaration(
+                'K',
+                ts.factory.createTypeReferenceNode(`${rootNodeName}Kind`)
+              )
+            ],
+            [
+              ts.factory.createParameterDeclaration(
+                undefined,
+                undefined,
+                undefined,
+                'kind',
+                undefined,
+                ts.factory.createTypeReferenceNode('K')
+              )
+            ],
+            ts.factory.createUnionTypeNode([
+              ts.factory.createIntersectionTypeNode([
+                ts.factory.createTypeReferenceNode(rootNodeName),
+                ts.factory.createTypeLiteralNode([
+                  ts.factory.createPropertySignature(
+                    undefined,
+                    'kind',
+                    undefined,
+                    ts.factory.createTypeReferenceNode('K'),
+                  )
+                ])
+              ]),
+              ts.factory.createLiteralTypeNode(ts.factory.createNull()),
+            ]),
+            ts.factory.createBlock([
+              ts.factory.createVariableStatement(
+                undefined,
+                ts.factory.createVariableDeclarationList([
+                  ts.factory.createVariableDeclaration(
+                    'currNode',
+                    undefined,
+                    undefined,
+                    ts.factory.createPropertyAccessExpression(ts.factory.createThis(), 'parentNode')
+                  )
+                ])
+              ),
+              ts.factory.createWhileStatement(
+                ts.factory.createBinaryExpression(
+                  ts.factory.createIdentifier('currNode'),
+                  ts.factory.createToken(ts.SyntaxKind.ExclamationEqualsEqualsToken),
+                  ts.factory.createNull()
+                ),
+                ts.factory.createBlock([
+                  ts.factory.createIfStatement(
+                    ts.factory.createBinaryExpression(
+                      ts.factory.createPropertyAccessExpression(
+                        ts.factory.createIdentifier('currNode'),
+                        'kind'
+                      ),
+                      ts.factory.createToken(ts.SyntaxKind.EqualsEqualsEqualsToken),
+                      ts.factory.createIdentifier('kind')
+                    ),
+                    ts.factory.createReturnStatement(
+                      ts.factory.createTypeAssertion(
+                        ts.factory.createToken(ts.SyntaxKind.AnyKeyword),
+                        ts.factory.createIdentifier('currNode')
+                      )
+                    )
+                  ),
+                  ts.factory.createExpressionStatement(
+                    ts.factory.createAssignment(
+                      ts.factory.createIdentifier('currNode'),
+                      ts.factory.createPropertyAccessExpression(
+                        ts.factory.createIdentifier('currNode'),
+                        'parentNode'
+                      )
+                    )
+                  )
+                ]),
+              ),
+              ts.factory.createReturnStatement(ts.factory.createNull())
+            ])
+          )
+        );
+      }
+
       writeNode(
         ts.factory.createClassDeclaration(
           rootDeclaration.decorators,
@@ -671,11 +866,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           `${rootNodeName}Base`,
           rootDeclaration.typeParameters,
           rootDeclaration.heritageClauses,
-          rootDeclaration.members.map((decl: ts.ClassElement | ts.TypeElement) => {
-            const classElement = convertToClassElement(decl);
-            implementationLimitation(classElement !== null);
-            return classElement;
-          }),
+          newMembers,
         )
       );
       return;
