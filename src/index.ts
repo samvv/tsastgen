@@ -353,63 +353,52 @@ export default function generateCode(sourceFile: ts.SourceFile, {
     const inheritanceChains: Symbol[][] = [];
 
     const generateInheritanceChains = (symbol: Symbol, currChain: Symbol[]) => {
-      if (symbol.getInheritedClassesOrInterfaces.length === 0) {
-        inheritanceChains.push(currChain);
+      if (symbol.getInheritedClassesOrInterfaces().length === 0) {
+        if (currChain.length > 0) {
+          inheritanceChains.push(currChain);
+        }
+        return;
       }
       for (const inheritedSymbol of symbol.getInheritedClassesOrInterfaces()) {
         generateInheritanceChains(inheritedSymbol, [...currChain, inheritedSymbol ])
       }
     }
 
-    generateInheritanceChains(symbol, [ symbol ]);
+    generateInheritanceChains(symbol, []);
 
-    const visitBottomUp = () => {
-
-      // First we visit the symbol itself and add any members we're interested
-      // in to the result.
-      if (visit(symbol) === false) {
-        return;
-      }
-
-      const visited = new Set<Symbol>();
-
-      // Next we walk though each individual inheritance chain, skipping a
-      // chain if `visitSymbol` returned false. Usually, this means a
-      // constructor was defined that consumes all parameters.
-      for (const chain of inheritanceChains) {
-
-        // Indicates whether the parameter belongs to `symbol` or to another base class.
-        // Interfaces do not set this variable to false. Only class declarations can do that.
-        let ownMembers = true;
-
-        for (const inheritedSymbol of chain.slice(1)) {
-          if (inheritedSymbol.declarations.some(ts.isClassDeclaration)) {
-            ownMembers = false;
-          }
-          if (visited.has(inheritedSymbol)) {
-            // We only get here if the remaining part of the inheritance chain
-            // has already been visited.
-            break;
-          }
-          visited.add(inheritedSymbol);
-          if (!visit(inheritedSymbol)) {
-            break;
-          }
-        }
-
-      }
-
+    // First we visit the symbol itself and add any members we're interested
+    // in to the result.
+    if (visit(symbol) === false) {
+      return;
     }
 
-    visitBottomUp();
+    const visited = new Set<Symbol>();
+
+    // Next we walk though each individual inheritance chain, skipping a chain
+    // if `visit` returned false. Usually, this means a constructor was defined
+    // that consumes all parameters.
+    outer: for (const chain of inheritanceChains) {
+      for (const inheritedSymbol of chain) {
+        if (visited.has(inheritedSymbol)) {
+          // We only get here if the remaining part of the inheritance chain
+          // has already been visited.
+          continue outer;
+        }
+        visited.add(inheritedSymbol);
+        if (visit(inheritedSymbol) === false) {
+          continue outer;
+        }
+      }
+    }
 
   }
 
   /**
-   * Finds all declarations that would be required when constructing the given node type.
-   * 
+   * Finds all declarations that would be required when constructing the given
+   * node type.
+   *
    * Declarations that should be part of the node type passed in are made
-   * 'public', while the rest do not have any class modifiers. 
+   * 'public', while the rest do not have any class modifiers.
    */
   const getFactoryParameters = memoise((symbol: Symbol): Array<ts.PropertySignature | ts.PropertyDeclaration | ts.ParameterDeclaration> => {
 
@@ -1215,11 +1204,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         )
       );
 
-      const factoryParameters = getFactoryParameters(symbol)
-        .map(convertToParameter)
-        .map(clearModifiers) as ts.ParameterDeclaration[];
-      const coercionStatements = [];
-
       // function isX(value: any) {
       //   return value.kind === SyntaxKind.X;
       // }
@@ -1258,6 +1242,12 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           ])
         )
       )
+
+      const factoryParameters = getFactoryParameters(symbol)
+        .map(convertToParameter)
+        .map(clearModifiers) as ts.ParameterDeclaration[];
+
+      const coercionStatements = [];
 
       if (generateCoercions) {
         for (const param of factoryParameters) {
