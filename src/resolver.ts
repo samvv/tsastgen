@@ -1,5 +1,6 @@
 
 import ts from "typescript";
+import { getArrayElementType, isArrayType, isKeywordType } from "./helpers";
 import { assert, FastMap, implementationLimitation } from "./util";
 
 let nextSymbolId = 0;
@@ -7,6 +8,9 @@ let nextSymbolId = 0;
 export class Symbol {
 
   public readonly id = nextSymbolId++;
+
+  private derivedClassesOrInterfaces?: Symbol[];
+  private inheritedClassesOrInterfaces?: Symbol[];
 
   constructor(public name: string, public declarations: ts.Node[], private symbolTable: SymbolTable) {
     
@@ -17,12 +21,12 @@ export class Symbol {
     return this.symbolTable;
   }
 
-  public isClassOrInterface() {
+  public get isClassOrInterface(): boolean {
     return this.declarations.every(node =>
       ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node))
   }
 
-  public isTypeAlias(): boolean {
+  public get isTypeAlias(): boolean {
     return this.declarations.length === 1
         && this.declarations.every(ts.isTypeAliasDeclaration);
   }
@@ -36,12 +40,12 @@ export class Symbol {
    * 
    * This property is only available to symbols that map to class or interface declarations.
    */
-  public get extendsTo(): Array<Symbol> {
+  public getDerivedClassesOrInterfaces(): Array<Symbol> {
 
     // We memoise the result because this computation can be quite expensive.
-    // if (this.inheritsResult !== undefined) {
-    //   return this.inheritsResult;
-    // }
+    if (this.derivedClassesOrInterfaces !== undefined) {
+      return this.derivedClassesOrInterfaces;
+    }
 
     // This array will contain our list of symbols that inherit from this symbol.
     const result = [];
@@ -85,7 +89,7 @@ export class Symbol {
     }
 
     // Save the result and make sure to also return it to the caller.
-    return result;
+    return this.derivedClassesOrInterfaces = result;
   }
 
   /**
@@ -94,7 +98,12 @@ export class Symbol {
    * This property is only available to symbols that map to class or interface
    * declarations.
    */
-  public get inheritsFrom(): Array<Symbol> {
+  public getInheritedClassesOrInterfaces(): Array<Symbol> {
+
+    // We memoise the result because this computation can be quite expensive.
+    if (this.inheritedClassesOrInterfaces !== undefined) {
+      return this.inheritedClassesOrInterfaces;
+    }
 
     // This array will contain each and every class/interface this symbol inherits from.
     const result = [];
@@ -126,7 +135,7 @@ export class Symbol {
 
     }
 
-    return result;
+    return this.inheritedClassesOrInterfaces = result;
   }
 
   /**
@@ -136,16 +145,16 @@ export class Symbol {
    * This property is only available to symbols that map to class or interface
    * declarations.
    */
-  public get allExtendsTo(): Symbol[] {
+  public getAllDerivedClassesOrInterfaces(): Symbol[] {
     const visited = new Set<Symbol>();
     const result = []
-    const toVisit = [...this.extendsTo];
+    const toVisit = [...this.getDerivedClassesOrInterfaces()];
     while (toVisit.length > 0) {
       const maybeFinalSymbol = toVisit.shift()!;
       if (!visited.has(maybeFinalSymbol)) {
         visited.add(maybeFinalSymbol);
         result.push(maybeFinalSymbol);
-        toVisit.push(...maybeFinalSymbol.extendsTo);
+        toVisit.push(...maybeFinalSymbol.getDerivedClassesOrInterfaces());
       }
     }
     return result;
@@ -160,26 +169,36 @@ export class Symbol {
    * 
    * @returns A list of inherited symbols in method resolution order.
    */
-  public get allInheritsFrom(): Symbol[] {
+  public getAllInheritedClassesOrInterfaces(): Symbol[] {
     const visited = new Set<Symbol>();
     const result = []
-    const toVisit = [...this.inheritsFrom];
+    const toVisit = [...this.getInheritedClassesOrInterfaces()];
     while (toVisit.length > 0) {
-      const maybeFinalSymbol = toVisit.shift()!;
-      if (!visited.has(maybeFinalSymbol)) {
-        visited.add(maybeFinalSymbol);
-        result.push(maybeFinalSymbol);
-        toVisit.push(...maybeFinalSymbol.inheritsFrom);
+      const inherited = toVisit.shift()!;
+      if (!visited.has(inherited)) {
+        visited.add(inherited);
+        result.push(inherited);
+        toVisit.push(...inherited.getInheritedClassesOrInterfaces());
       }
     }
     return result;
   }
 
-  public get baseSymbols(): Symbol[] {
-    return this.allInheritsFrom.filter(baseSymbol => baseSymbol.inheritsFrom.length === 0);
+  /**
+   * Get the classes or interfaces that do not inherit from another class or
+   * interface and are considered to be top-level.
+   * 
+   * @returns A list of symbols that point to specific classes or interfaces
+   */
+  public getBaseClassesOrInterfaces(): Symbol[] {
+    return this.getAllInheritedClassesOrInterfaces().filter(baseSymbol => baseSymbol.getInheritedClassesOrInterfaces.length === 0);
   }
 
-  public get members() {
+  /**
+   * Get all members from a class or interface declaration, no matter where they are (re)defined.
+   */
+  public getMembers() {
+    assert(this.isClassOrInterface);
     const result = []
     for (const declaration of this.declarations) {
       assert(ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration));
@@ -202,7 +221,7 @@ export class Symbol {
       if (symbol === target) {
         return path;
       }
-      for (const inheritedSymbol of symbol.inheritsFrom) {
+      for (const inheritedSymbol of symbol.getInheritedClassesOrInterfaces()) {
         const result = visit(inheritedSymbol, [...path, inheritedSymbol ]);
         if (result !== null) {
           return result;
@@ -343,13 +362,17 @@ export class DeclarationResolver {
     if (ts.isArrayTypeNode(typeNode)) {
       return this.getReferencedSymbolsInTypeNode(typeNode.elementType)
     }
-    return [];
+    if (ts.isParenthesizedTypeNode(typeNode)) {
+      return this.getReferencedSymbolsInTypeNode(typeNode);
+    }
+    if (ts.isLiteralTypeNode(typeNode) || isKeywordType(typeNode)) {
+      return [];
+    }
+    throw new Error(`Could not collect referenced symbols in TypeScript type node: unhandled node type`)
   }
 
   public resolveTypeReferenceNode(typeNode: ts.TypeReferenceNode): Symbol | null {
-    if (typeNode.typeArguments !== undefined || !ts.isIdentifier(typeNode.typeName)) {
-      return null;
-    }
+    implementationLimitation(ts.isIdentifier(typeNode.typeName));
     return this.resolve(typeNode.typeName.getText(), typeNode);
   }
 

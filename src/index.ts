@@ -1,6 +1,6 @@
 
 import ts from "typescript"
-import { convertToReference, areTypesDisjoint, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers, doTypesOverlap } from "./helpers";
+import { convertToReference, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers, doTypesOverlap } from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
 import { assert, implementationLimitation, memoise } from "./util";
@@ -10,6 +10,7 @@ export interface CodeGeneratorOptions {
   parentMemberName?: string | null;
   idMemberName?: string | null;
   generateVisitor?: boolean;
+  generateCoercions?: boolean;
 }
 
 type Coercion = [ts.TypeNode, Symbol];
@@ -71,6 +72,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   parentMemberName = null,
   rootNodeName = 'Syntax',
   generateVisitor = true,
+  generateCoercions = false,
 }: CodeGeneratorOptions = {}): string {
 
   let out = '';
@@ -105,24 +107,24 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   }
 
   const isVariant = memoise((symbol: Symbol): boolean => {
-    return symbol.isTypeAlias()
+    return symbol.isTypeAlias
         && isTypeNodeOnlyReferencingAST(symbol.asTypeAliasDeclaration().type);
   }, 'id');
 
   const isIntermediate = memoise((symbol: Symbol): boolean => {
-    if (!symbol.isClassOrInterface()) {
+    if (!symbol.isClassOrInterface) {
       return false;
     }
-    return symbol.allInheritsFrom.some(upSymbol => upSymbol === rootSymbol)
-        && symbol.allExtendsTo.some(downSymbol => isNodeType(downSymbol));
+    return symbol.getAllInheritedClassesOrInterfaces().some(upSymbol => upSymbol === rootSymbol)
+        && symbol.getDerivedClassesOrInterfaces().some(downSymbol => isNodeType(downSymbol));
   }, 'id')
 
   const isNodeType = memoise((symbol: Symbol): boolean => {
-    if (!symbol.isClassOrInterface()) {
+    if (!symbol.isClassOrInterface) {
       return false;
     }
-    return symbol.allInheritsFrom.some(upSymbol => upSymbol === rootSymbol)
-        && !symbol.allExtendsTo.some(downSymbol => isNodeType(downSymbol));
+    return symbol.getAllInheritedClassesOrInterfaces().some(upSymbol => upSymbol === rootSymbol)
+        && !symbol.getDerivedClassesOrInterfaces().some(downSymbol => isNodeType(downSymbol));
   }, 'id');
 
   const getAllNodeTypesDerivingFrom = memoise((symbol: Symbol): Symbol[] => {
@@ -130,7 +132,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       return [ symbol ]
     }
     if (isIntermediate(symbol)) {
-      return symbol.allExtendsTo.filter(otherSymbol => isNodeType(otherSymbol))
+      return symbol.getDerivedClassesOrInterfaces().filter(otherSymbol => isNodeType(otherSymbol))
     }
     if (isVariant(symbol)) {
       const result = new Set<Symbol>();
@@ -351,10 +353,10 @@ export default function generateCode(sourceFile: ts.SourceFile, {
     const inheritanceChains: Symbol[][] = [];
 
     const generateInheritanceChains = (symbol: Symbol, currChain: Symbol[]) => {
-      if (symbol.inheritsFrom.length === 0) {
+      if (symbol.getInheritedClassesOrInterfaces.length === 0) {
         inheritanceChains.push(currChain);
       }
-      for (const inheritedSymbol of symbol.inheritsFrom) {
+      for (const inheritedSymbol of symbol.getInheritedClassesOrInterfaces()) {
         generateInheritanceChains(inheritedSymbol, [...currChain, inheritedSymbol ])
       }
     }
@@ -896,7 +898,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       assert(ts.isInterfaceDeclaration(node) || ts.isClassDeclaration(node));
       assert(node.name !== undefined);
 
-      const nodeTypes = symbol.allExtendsTo.filter(isNodeType)
+      const nodeTypes = symbol.getDerivedClassesOrInterfaces().filter(isNodeType)
 
       implementationLimitation(node.name !== undefined)
       // export class XBase extends ... {
