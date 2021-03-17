@@ -294,7 +294,6 @@ export function doTypesOverlap(a: ts.TypeNode, b: ts.TypeNode): boolean {
     return a.typeArguments.some((typeArg, i) => doTypesOverlap(typeArg, b.typeArguments![i]))
   }
   if (ts.isUnionTypeNode(b)) {
-    console.log(a);
     return b.types.some(type => doTypesOverlap(a, type))
   }
   if (ts.isUnionTypeNode(a)) {
