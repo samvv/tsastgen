@@ -1,33 +1,29 @@
 
 import test from "ava";
-import {createImportDeclaration} from "typescript";
 
 import {
   createAddExpression,
-  CalcNodeKind,
-  ConstantExpression,
   createConstantExpression,
   setParents,
   createDefinition,
-  ReferenceExpression,
   createSheet,
   createIdentifier
 } from "./calculator";
 
-test('can use coercion in factory functions', t => {
-  const addOneTwo = createAddExpression(1, 'x');
-  t.assert(addOneTwo.kind === CalcNodeKind.AddExpression);
-  t.assert(addOneTwo.left.kind === CalcNodeKind.ConstantExpression);
-  t.assert((addOneTwo.left as ConstantExpression).value === 1);
-  t.assert(addOneTwo.right.kind === CalcNodeKind.ReferenceExpression);
-  t.assert((addOneTwo.right as ReferenceExpression).name === 'x');
-});
+//test('can use coercion in factory functions', t => {
+//  const addOneTwo = createAddExpression(1, 'x');
+//  t.assert(addOneTwo.kind === CalcNodeKind.AddExpression);
+//  t.assert(addOneTwo.left.kind === CalcNodeKind.ConstantExpression);
+//  t.assert((addOneTwo.left as ConstantExpression).value === 1);
+//  t.assert(addOneTwo.right.kind === CalcNodeKind.ReferenceExpression);
+//  t.assert((addOneTwo.right as ReferenceExpression).name === 'x');
+//});
 
 test('can get the parent of a node after setParents()', t => {
   const one = createConstantExpression(1);
   const two = createConstantExpression(2);
   const addOneTwo = createAddExpression(one, two);
-  const foo = createDefinition('foo', addOneTwo)
+  const foo = createDefinition(createIdentifier('foo'), addOneTwo)
   setParents(foo)
   t.assert(foo.parentNode === null);
   t.assert(one.parentNode === addOneTwo);
