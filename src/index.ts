@@ -1259,29 +1259,31 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         )
       )
 
-      for (const param of factoryParameters) {
-        if (param.type === undefined) {
-          continue;
-        }
-        implementationLimitation(ts.isIdentifier(param.name));
-        for (const [typeToCastFrom, nodeType]  of getCoercions(param.type)) {
-          coercionStatements.push(
-            ts.factory.createIfStatement(
-              buildPredicateFromTypeNode(typeToCastFrom, param.name),
-              ts.factory.createExpressionStatement(
-                ts.factory.createAssignment(
-                  param.name,
-                  ts.factory.createCallExpression(
-                    ts.factory.createIdentifier(`create${nodeType.name}`),
-                    undefined,
-                    [
-                      param.name as ts.Identifier,
-                    ]
+      if (generateCoercions) {
+        for (const param of factoryParameters) {
+          if (param.type === undefined) {
+            continue;
+          }
+          implementationLimitation(ts.isIdentifier(param.name));
+          for (const [typeToCastFrom, nodeType]  of getCoercions(param.type)) {
+            coercionStatements.push(
+              ts.factory.createIfStatement(
+                buildPredicateFromTypeNode(typeToCastFrom, param.name),
+                ts.factory.createExpressionStatement(
+                  ts.factory.createAssignment(
+                    param.name,
+                    ts.factory.createCallExpression(
+                      ts.factory.createIdentifier(`create${nodeType.name}`),
+                      undefined,
+                      [
+                        param.name as ts.Identifier,
+                      ]
+                    )
                   )
                 )
               )
-            )
-          );
+            );
+          }
         }
       }
 
@@ -1296,7 +1298,9 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           `create${symbol.name}`,
           undefined,
           [
-            ...factoryParameters.map(addCoercionsToParameter),
+            ...generateCoercions 
+              ? factoryParameters.map(addCoercionsToParameter)
+              : factoryParameters,
           ],
           ts.factory.createTypeReferenceNode(symbol.name, undefined),
           ts.factory.createBlock([

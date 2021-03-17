@@ -15,7 +15,7 @@ union types, visitors, and predicates based on this specification.
  - Generate typed reflection functions such as `Node.getChildNodes()` and
    `isFoo()`
  - Generate typed factory functions that are able to automatically lift simple
-   primitive values to entire nodes.
+   primitive values to entire nodes _(experimental)_.
  - Ability to generate typed links to the parent node that only lists node
    types that can actually be a parent.
 
@@ -224,6 +224,12 @@ The specification file that AST definitions will be generated from.
 If present, the file where the transformed `input-file` must be written to.
 
 If not present, the program will output the result to standard output.
+
+### --with-coercions
+
+Enable experimental code generation of coercion statements in factory
+functions. Currently, due to limitations in the built-in type checking
+algorithm, this will not work for complex ASTs.
 
 ### --with-root-node
 

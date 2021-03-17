@@ -29,7 +29,8 @@ for (const file of files) {
     generateVisitor: argv['with-visitor'],
     rootNodeName: argv['with-root-node'] ?? argv['root-node'],
     parentMemberName: argv['with-parent-member'],
-    idMemberName: argv['with-id-member']
+    idMemberName: argv['with-id-member'],
+    generateCoercions: argv['with-coercions'],
   });
   if (outFile === null) {
     console.error(generatedCode);
