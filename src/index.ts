@@ -1204,7 +1204,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         )
       );
 
-      // function isX(value: any) {
+      // function isX(value: any): value is X {
       //   return value.kind === SyntaxKind.X;
       // }
       writeNode(
@@ -1225,7 +1225,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
               undefined
             )
           ],
-          ts.factory.createKeywordTypeNode(ts.SyntaxKind.BooleanKeyword),
+          ts.factory.createTypePredicateNode(undefined, 'value', ts.factory.createTypeReferenceNode(symbol.name)),
           ts.factory.createBlock([
             ts.factory.createReturnStatement(
               buildEquality(
