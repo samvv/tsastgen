@@ -127,7 +127,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       return false;
     }
     return symbol.getAllInheritedClassesOrInterfaces().some(upSymbol => upSymbol === rootSymbol)
-        && symbol.getDerivedClassesOrInterfaces().some(downSymbol => isNodeType(downSymbol));
+        && symbol.getDerivedClassesOrInterfaces().some(downSymbol => isAST(downSymbol));
   }, 'id')
 
   const isNodeType = memoise((symbol: Symbol): boolean => {
@@ -135,7 +135,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       return false;
     }
     return symbol.getAllInheritedClassesOrInterfaces().some(upSymbol => upSymbol === rootSymbol)
-        && !symbol.getDerivedClassesOrInterfaces().some(downSymbol => isNodeType(downSymbol));
+        && !symbol.getAllDerivedClassesOrInterfaces().some(downSymbol => isAST(downSymbol));
   }, 'id');
 
   const getAllNodeTypesDerivingFrom = memoise((symbol: Symbol): Symbol[] => {
@@ -143,7 +143,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       return [ symbol ]
     }
     if (isIntermediate(symbol)) {
-      return symbol.getDerivedClassesOrInterfaces().filter(otherSymbol => isNodeType(otherSymbol))
+      return symbol.getAllDerivedClassesOrInterfaces().filter(otherSymbol => isNodeType(otherSymbol))
     }
     if (isVariant(symbol)) {
       const result = new Set<Symbol>();
@@ -227,12 +227,14 @@ export default function generateCode(sourceFile: ts.SourceFile, {
 
   const getAllNodeTypesHavingSymbolInField = memoise((nodeType: Symbol) => {
     const result = [];
-    for (const otherSymbol of resolver.getAllSymbols()) {
-      if (isNodeType(otherSymbol)) {
-        for (const referencedSymbol of getAllASTInFieldsOfSymbol(otherSymbol)) {
-          const referencedNodeTypes = getAllNodeTypesDerivingFrom(referencedSymbol);
-          if (referencedNodeTypes.indexOf(nodeType) !== -1) {
-            result.push(otherSymbol);
+    for (const inheritedSymbol of [nodeType, ...nodeType.getAllInheritedClassesOrInterfaces()]) {
+      outer: for (const otherSymbol of resolver.getAllSymbols()) {
+        if (isNodeType(otherSymbol)) {
+          for (const referencedSymbol of getAllASTInFieldsOfSymbol(otherSymbol)) {
+            if (referencedSymbol === inheritedSymbol || referencedSymbol.getAllDerivedClassesOrInterfaces().indexOf(inheritedSymbol) !== -1) {
+              result.push(otherSymbol);
+              continue outer;
+            }
           }
         }
       }
@@ -967,7 +969,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       assert(ts.isInterfaceDeclaration(node) || ts.isClassDeclaration(node));
       assert(node.name !== undefined);
 
-      const nodeTypes = symbol.getDerivedClassesOrInterfaces().filter(isNodeType)
+      const nodeTypes = getAllNodeTypesDerivingFrom(symbol);
 
       implementationLimitation(node.name !== undefined)
       // export class XBase extends ... {
