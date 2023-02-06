@@ -1,5 +1,5 @@
 
-import ts, { ModifiersArray } from "typescript"
+import ts from "typescript"
 import { assert, implementationLimitation } from "./util";
 
 /**
@@ -95,23 +95,17 @@ export function findConstructor(
 /**
  * Check whether a given node has a specific modifier.
  */
-export function hasModifier(modifiers: ts.ModifiersArray | undefined, kind: ts.ModifierSyntaxKind): boolean {
+export function hasModifier(modifiers: readonly ts.Modifier[] | undefined, kind: ts.ModifierSyntaxKind): boolean {
   if (modifiers === undefined) {
     return false;
   }
-  return [...modifiers].find(m => m.kind === kind) !== undefined;
+  return modifiers.find(m => m.kind === kind) !== undefined;
 }
 
 /**
  * Check whether the given modifiers array has the public, private or protected modifiers.
- * 
- * @param modifiers A modifiers array to check for class modifiers.
- * @returns 
  */
-export function hasClassModifier(modifiers: ts.ModifiersArray | undefined): boolean {
-  if (modifiers === undefined) {
-    return false;
-  }
+export function hasClassModifier(modifiers: readonly ts.Modifier[] | undefined): boolean {
   return hasModifier(modifiers, ts.SyntaxKind.PublicKeyword)
       || hasModifier(modifiers, ts.SyntaxKind.ProtectedKeyword)
       || hasModifier(modifiers, ts.SyntaxKind.PrivateKeyword)
@@ -120,30 +114,27 @@ export function hasClassModifier(modifiers: ts.ModifiersArray | undefined): bool
 /**
  * Adds the public class modifier if no class modifier has been specified yet.
  */
-export function addPublicModifier(modifiers: ts.ModifiersArray | undefined): ts.ModifiersArray {
+export function addPublicModifier(modifiers: readonly ts.Modifier[] | undefined): readonly ts.Modifier[] {
   if (modifiers === undefined) {
-    return ts.factory.createNodeArray([
+    return [
       ts.factory.createModifier(ts.SyntaxKind.PublicKeyword)
-    ]);
+    ];
   }
-  if (hasModifier(modifiers, ts.SyntaxKind.PublicKeyword)
-      || hasModifier(modifiers, ts.SyntaxKind.ProtectedKeyword)
-      || hasModifier(modifiers, ts.SyntaxKind.PrivateKeyword)) {
+  if (hasClassModifier(modifiers)) {
     return modifiers;
   }
   const newModifiers = [...modifiers];
   newModifiers.unshift(ts.factory.createModifier(ts.SyntaxKind.PublicKeyword));
-  return ts.factory.createNodeArray(modifiers);
+  return modifiers;
 }
 
-export function makePublic(node: ts.ParameterDeclaration | ts.ClassElement | ts.TypeElement) {
-  if (hasClassModifier(node.modifiers)) {
+export function makePublic(node: ts.HasModifiers) {
+  if (hasClassModifier(ts.getModifiers(node))) {
     return node;
   }
   if (ts.isParameter(node)) {
     return ts.factory.createParameterDeclaration(
-      node.decorators,
-      addPublicModifier(node.modifiers),
+      addPublicModifier(ts.getModifiers(node)),
       node.dotDotDotToken,
       node.name,
       node.questionToken,
@@ -153,7 +144,7 @@ export function makePublic(node: ts.ParameterDeclaration | ts.ClassElement | ts.
   }
   if (ts.isPropertySignature(node)) {
     return ts.factory.createPropertySignature(
-      addPublicModifier(node.modifiers),
+      addPublicModifier(ts.getModifiers(node)),
       node.name,
       node.questionToken,
       node.type
@@ -378,7 +369,6 @@ export function convertToClassElement(node: ts.Node): ts.ClassElement | null {
   }
   if (ts.isPropertySignature(node)) {
     return ts.factory.createPropertyDeclaration(
-      node.decorators,
       node.modifiers,
       node.name,
       node.questionToken,
@@ -389,8 +379,7 @@ export function convertToClassElement(node: ts.Node): ts.ClassElement | null {
   if (ts.isParameter(node)) {
     implementationLimitation(ts.isIdentifier(node.name));
     return ts.factory.createPropertyDeclaration(
-      node.decorators,
-      node.modifiers,
+      ts.getModifiers(node),
       node.name,
       node.questionToken,
       node.type,
@@ -403,7 +392,6 @@ export function convertToClassElement(node: ts.Node): ts.ClassElement | null {
 export function clearModifiers(node: ts.Node): ts.Node {
   if (ts.isParameter(node)) {
     return ts.factory.createParameterDeclaration(
-      node.decorators,
       undefined,
       node.dotDotDotToken,
       node.name,
@@ -430,8 +418,7 @@ export function convertToParameter(node: ts.Node): ts.ParameterDeclaration {
   if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
     assert(ts.isBindingName(node.name))
     return ts.factory.createParameterDeclaration(
-      node.decorators,
-      node.modifiers,
+      ts.getModifiers(node),
       undefined,
       node.name,
       node.questionToken,

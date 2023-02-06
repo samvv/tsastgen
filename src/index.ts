@@ -90,7 +90,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   }
 
   function writeCustomNode(node: ts.Node): void {
-    if (!hasModifier(node.modifiers, ts.SyntaxKind.DeclareKeyword)) {
+    if (!(ts.canHaveModifiers(node) && hasModifier(ts.getModifiers(node), ts.SyntaxKind.DeclareKeyword))) {
       writeNode(node);
     }
   }
@@ -333,7 +333,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   function addCoercionsToParameter(param: ts.ParameterDeclaration) {
     return ts.factory.createParameterDeclaration(
       param.decorators,
-      param.modifiers,
+      ts.getModifiers(param),
       param.dotDotDotToken,
       param.name,
       param.questionToken,
@@ -765,18 +765,17 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           ts.factory.createMethodDeclaration(
             undefined,
             undefined,
-            undefined,
             'getParentOfKind',
             undefined,
             [
               ts.factory.createTypeParameterDeclaration(
+                undefined,
                 'K',
                 ts.factory.createTypeReferenceNode(`${rootNodeName}Kind`)
               )
             ],
             [
               ts.factory.createParameterDeclaration(
-                undefined,
                 undefined,
                 undefined,
                 'kind',
@@ -852,8 +851,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
 
       writeNode(
         ts.factory.createClassDeclaration(
-          rootDeclaration.decorators,
-          rootDeclaration.modifiers,
+          ts.getModifiers(rootDeclaration),
           `${rootNodeName}Base`,
           rootDeclaration.typeParameters,
           rootDeclaration.heritageClauses,
@@ -895,8 +893,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       // }
       writeNode(
         ts.factory.createClassDeclaration(
-          node.decorators,
-          node.modifiers,
+          ts.getModifiers(node),
           `${node.name.getText()}Base`,
           node.typeParameters,
           transformHeritageClauses(node.heritageClauses),
@@ -910,8 +907,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       //   ...
       writeNode(
         ts.factory.createTypeAliasDeclaration(
-          undefined,
-          node.modifiers,
+          ts.getModifiers(node),
           node.name,
           undefined,
           ts.factory.createUnionTypeNode(
@@ -927,14 +923,12 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       // }
       writeNode(
         ts.factory.createFunctionDeclaration(
-          node.decorators,
-          node.modifiers,
+          ts.getModifiers(node),
           undefined,
           `is${symbol.name}`,
           undefined,
           [
             ts.factory.createParameterDeclaration(
-              undefined,
               undefined,
               undefined,
               'value',
@@ -986,14 +980,12 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       // }
       writeNode(
         ts.factory.createFunctionDeclaration(
-          undefined,
           [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
           undefined,
           `is${symbol.name}`,
           undefined,
           [
             ts.factory.createParameterDeclaration(
-              undefined,
               undefined,
               undefined,
               'value',
@@ -1041,7 +1033,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       const parentSymbols = getAllNodeTypesHavingSymbolInField(symbol);
       const childSymbols = getAllASTInFieldsOfSymbol(symbol);
       const membersWithAST = getFactoryParameters(symbol)
-        .filter(member => hasClassModifier(member.modifiers))
+        .filter(member => hasClassModifier(ts.getModifiers(member)))
         .filter(member => getAllNodeTypesInTypeNode(member.type!).length > 0);
 
       let constructor = null;
@@ -1057,7 +1049,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       classMembers.push(
         // public readonly kind = SyntaxKind.X;
         ts.factory.createPropertyDeclaration(
-          undefined,
           [ ts.factory.createToken(ts.SyntaxKind.ReadonlyKeyword) ],
           'kind',
           undefined,
@@ -1074,7 +1065,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         classMembers.push(
           // public parentNode: XParent | null = null;
           ts.factory.createPropertyDeclaration(
-            undefined,
             undefined,
             parentMemberName,
             undefined,
@@ -1095,7 +1085,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           // constructor(public field: T, ...) { super(field...) }
           ts.factory.createConstructorDeclaration(
             undefined,
-            undefined,
             [
               ...constructorParameters.map(convertToParameter),
             ],
@@ -1104,7 +1093,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
                 ts.factory.createCallExpression(
                   ts.factory.createSuper(),
                   undefined,
-                  constructorParameters.filter(param => !hasClassModifier(param.modifiers)).map(convertToReference)
+                  constructorParameters.filter(param => !hasClassModifier(ts.getModifiers(param))).map(convertToReference)
                 )
               )
             ])
@@ -1115,7 +1104,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       classMembers.push(
         // public *getChildNodes(): Iterable<XChild> { ... }
         ts.factory.createMethodDeclaration(
-          undefined,
           undefined,
           ts.factory.createToken(ts.SyntaxKind.AsteriskToken),
           `getChildNodes`,
@@ -1157,7 +1145,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         // }
         ts.factory.createClassDeclaration(
           undefined,
-          node.modifiers,
+          ts.getModifiers(node),
           symbol.name,
           undefined,
           transformHeritageClauses(node.heritageClauses),
@@ -1545,7 +1533,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   )
 
   const rootUnionModfiers = [];
-  if (hasModifier(rootDeclaration.modifiers, ts.SyntaxKind.ExportKeyword)) {
+  if (hasModifier(ts.getModifiers(rootDeclaration), ts.SyntaxKind.ExportKeyword)) {
     rootUnionModfiers.push(ts.factory.createToken(ts.SyntaxKind.ExportKeyword));
   }
 
