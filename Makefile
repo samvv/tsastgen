@@ -11,6 +11,6 @@ clean:
 	rm -rf lib/
 	rm -rf test/lib/
 
-test/calculator.ts: examples/calculator.ts
-	tsastgen examples/calculator.ts:test/calculator.ts --with-root-node CalcNode --with-parent-member parentNode
-
+test/calculator.ts: $(wildcard src/*.ts) examples/calculator.ts
+	tsastgen examples/calculator.ts:test/calculator.ts --root-node CalcNode --with-parent-member parentNode
+	tsastgen examples/calculator.ts:test/calculator-with-mutators.ts --root-node CalcNode --with-parent-member parentNode --with-mutators

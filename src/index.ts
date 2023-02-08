@@ -1,6 +1,19 @@
 
+import { dir } from "console";
 import ts from "typescript"
-import { convertToReference, convertToClassElement, findConstructor, hasClassModifier, hasModifier, isKeywordType, isNodeExported, addPublicModifier, removeClassModifiers, makePublic, isSuperCall, convertToParameter, clearModifiers, doTypesOverlap } from "./helpers";
+import {
+  convertToReference,
+  convertToClassElement,
+  findConstructor,
+  hasClassModifier,
+  hasModifier,
+  isKeywordType,
+  isNodeExported,
+  makePublic,
+  convertToParameter,
+  clearModifiers,
+  doTypesOverlap
+} from "./helpers";
 
 import { DeclarationResolver, Symbol } from "./resolver";
 import { assert, implementationLimitation, memoise } from "./util";
@@ -8,20 +21,13 @@ import { assert, implementationLimitation, memoise } from "./util";
 export interface CodeGeneratorOptions {
   rootNodeName?: string;
   parentMemberName?: string | null;
-  idMemberName?: string | null;
   generateVisitor?: boolean;
   generateCoercions?: boolean;
+  generateEdges?: boolean;
+  generateMutators?: boolean;
 }
 
 type Coercion = [ts.TypeNode, Symbol];
-
-function first<T1, T2>(tuple: [T1, T2]): T1 {
-  return tuple[0];
-}
-
-function second<T1, T2>(tuple: [T1, T2]): T2 {
-  return tuple[1];
-}
 
 function buildTypeOfEquality(expr: ts.Expression, typeStr: ts.Expression) {
   return ts.factory.createBinaryExpression(
@@ -68,12 +74,17 @@ function buildBinaryExpression(operator: ts.BinaryOperator, args: ts.Expression[
 }
 
 export default function generateCode(sourceFile: ts.SourceFile, {
-  idMemberName = 'id',
   parentMemberName = null,
   rootNodeName = 'Syntax',
   generateVisitor = true,
   generateCoercions = false,
+  generateMutators = false,
+  generateEdges = false,
 }: CodeGeneratorOptions = {}): string {
+
+  if (generateMutators) {
+    generateEdges = true;
+  }
 
   let out = '';
 
@@ -332,13 +343,12 @@ export default function generateCode(sourceFile: ts.SourceFile, {
 
   function addCoercionsToParameter(param: ts.ParameterDeclaration) {
     return ts.factory.createParameterDeclaration(
-      param.decorators,
       ts.getModifiers(param),
       param.dotDotDotToken,
       param.name,
       param.questionToken,
       param.type !== undefined
-        ? ts.factory.createUnionTypeNode([param.type, ...getCoercions(param.type).map(([typeNode, symbol]) => typeNode)])
+        ? ts.factory.createUnionTypeNode([param.type, ...getCoercions(param.type).map(([typeNode, _symbol]) => typeNode)])
         : undefined,
       param.initializer
     )
@@ -587,14 +597,25 @@ export default function generateCode(sourceFile: ts.SourceFile, {
     }
     return result;
   }
+  
+  function buildEdgeArray(path: Array<string | number>): ts.Expression {
+    return ts.factory.createArrayLiteralExpression(
+      path.map(chunk => typeof chunk === 'string'
+              ? ts.factory.createStringLiteral(chunk)
+              : ts.factory.createNumericLiteral(chunk)
+      )
+    );
+  }
 
-  function buildChildrenOfStatement(type: ts.TypeNode, value: ts.Expression): ts.Statement | null {
+  function buildYieldChildStatements(type: ts.TypeNode, value: ts.Expression, path: Array<string | number>, yieldEdges = false): ts.Statement | null {
+
     if (ts.isUnionTypeNode(type)) {
+      // FIXME not tested for mistakes?
       const isNullable = type.types.find(t => ts.isLiteralTypeNode(t) && t.literal.kind === ts.SyntaxKind.NullKeyword) !== undefined;
       const remainingTypes = type.types.filter(t => t.kind !== ts.SyntaxKind.NullKeyword);
       const mapped: Array<[ts.TypeNode, ts.Statement]> = [];
       for (const elementTypeNode of remainingTypes) {
-        const yieldStatement = buildChildrenOfStatement(elementTypeNode, value);
+        const yieldStatement = buildYieldChildStatements(elementTypeNode, value, path, yieldEdges);
         if (yieldStatement !== null) {
           mapped.push([ elementTypeNode, yieldStatement ]);
         }
@@ -630,42 +651,59 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       }
       return result;
     }
+
     if (ts.isTypeReferenceNode(type)
         && type.typeName.getText() === 'Array'
         && type.typeArguments !== undefined) {
-      const yieldStatements = buildChildrenOfStatement(type.typeArguments[0], ts.factory.createIdentifier('element'))
-      if (yieldStatements === null) {
-        return null;
-      }
-      return ts.factory.createForOfStatement(
-        undefined,
-        ts.factory.createVariableDeclarationList([
-          ts.factory.createVariableDeclaration('element')
-        ], ts.NodeFlags.Let),
-        value,
-        yieldStatements,
-      )
+      return buildArray(type.typeArguments[0]);
     }
+
     if (ts.isArrayTypeNode(type)) {
-      const yieldStatements = buildChildrenOfStatement(type.elementType, ts.factory.createIdentifier('element'));
+      return buildArray(type.elementType);
+    }
+
+    function buildArray(elementType: ts.TypeNode) {
+      const yieldStatements = buildYieldChildStatements(elementType, ts.factory.createElementAccessExpression(value, ts.factory.createIdentifier('i')), [ ...path, 'i' ], yieldEdges);
       if (yieldStatements === null) {
         return null;
       }
-      return ts.factory.createForOfStatement(
-        undefined,
-        ts.factory.createVariableDeclarationList([
-          ts.factory.createVariableDeclaration('element')
-        ], ts.NodeFlags.Let),
-        value,
+      return ts.factory.createForStatement(
+        ts.factory.createVariableDeclarationList(
+          [
+            ts.factory.createVariableDeclaration('i', undefined, undefined, ts.factory.createNumericLiteral(0))
+          ],
+          ts.NodeFlags.Let
+        ),
+        ts.factory.createBinaryExpression(
+          ts.factory.createIdentifier('i'),
+          ts.SyntaxKind.LessThanToken,
+          ts.factory.createPropertyAccessExpression(value, 'length'),
+        ),
+        ts.factory.createPostfixIncrement(
+          ts.factory.createIdentifier('i')
+        ),
         yieldStatements
       )
     }
+
     if (ts.isTypeReferenceNode(type)) {
-      return ts.factory.createExpressionStatement(ts.factory.createYieldExpression(undefined, value));
+      return ts.factory.createExpressionStatement(
+        ts.factory.createYieldExpression(
+          undefined,
+          yieldEdges
+            ? ts.factory.createArrayLiteralExpression([
+                buildEdgeArray(path),
+                value
+              ])
+            : value
+        )
+      );
     }
+
     if (isKeywordType(type)) {
       return null;
     }
+
     return null;
   }
 
@@ -880,6 +918,50 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       exportModifier.push(ts.factory.createModifier(ts.SyntaxKind.ExportKeyword));
     }
 
+    function buildIsNodePredicate(name: string, modifiers: readonly ts.Modifier[] | undefined, symbols: Symbol[]): ts.FunctionDeclaration {
+      return ts.factory.createFunctionDeclaration(
+        modifiers,
+        undefined,
+        `is${name}`,
+        undefined,
+        [
+          ts.factory.createParameterDeclaration(
+            undefined,
+            undefined,
+            'value',
+            undefined,
+            ts.factory.createTypeReferenceNode(rootNodeName)
+          )
+        ],
+        ts.factory.createTypePredicateNode(
+          undefined,
+          'value',
+          ts.factory.createTypeReferenceNode(name, undefined)
+        ),
+        ts.factory.createBlock([
+          ts.factory.createReturnStatement(
+            buildBinaryExpression(
+              ts.SyntaxKind.BarBarToken,
+              symbols.map(symbol => 
+                buildEquality(
+                  ts.factory.createPropertyAccessChain(
+                    ts.factory.createIdentifier('value'),
+                    undefined,
+                    'kind'
+                  ),
+                  ts.factory.createPropertyAccessChain(
+                    ts.factory.createIdentifier(`${rootNodeName}Kind`),
+                    undefined,
+                    symbol.name
+                  )
+                )
+              )
+            )
+          )
+        ])
+      );
+    }
+
     if (isIntermediate(symbol)) {
 
       assert(ts.isInterfaceDeclaration(node) || ts.isClassDeclaration(node));
@@ -922,47 +1004,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       //       || ...
       // }
       writeNode(
-        ts.factory.createFunctionDeclaration(
-          ts.getModifiers(node),
-          undefined,
-          `is${symbol.name}`,
-          undefined,
-          [
-            ts.factory.createParameterDeclaration(
-              undefined,
-              undefined,
-              'value',
-              undefined,
-              ts.factory.createTypeReferenceNode(rootNodeName)
-            )
-          ],
-          ts.factory.createTypePredicateNode(
-            undefined,
-            'value',
-            ts.factory.createTypeReferenceNode(symbol.name, undefined)
-          ),
-          ts.factory.createBlock([
-            ts.factory.createReturnStatement(
-              buildBinaryExpression(
-                ts.SyntaxKind.BarBarToken,
-                nodeTypes.map(nodeTypeSymbol => 
-                  buildEquality(
-                    ts.factory.createPropertyAccessChain(
-                      ts.factory.createIdentifier('value'),
-                      undefined,
-                      'kind'
-                    ),
-                    ts.factory.createPropertyAccessChain(
-                      ts.factory.createIdentifier(`${rootNodeName}Kind`),
-                      undefined,
-                      nodeTypeSymbol.name
-                    )
-                  )
-                )
-              )
-            )
-          ])
-        )
+        buildIsNodePredicate(node.name.getText(), ts.getModifiers(node), nodeTypes)
       );
 
       return;
@@ -979,47 +1021,7 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       //       || ...
       // }
       writeNode(
-        ts.factory.createFunctionDeclaration(
-          [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
-          undefined,
-          `is${symbol.name}`,
-          undefined,
-          [
-            ts.factory.createParameterDeclaration(
-              undefined,
-              undefined,
-              'value',
-              undefined,
-              ts.factory.createTypeReferenceNode(rootNodeName)
-            )
-          ],
-          ts.factory.createTypePredicateNode(
-            undefined,
-            'value',
-            ts.factory.createTypeReferenceNode(symbol.name, undefined)
-          ),
-          ts.factory.createBlock([
-            ts.factory.createReturnStatement(
-              buildBinaryExpression(
-                ts.SyntaxKind.BarBarToken,
-                getAllNodeTypesDerivingFrom(symbol).map(node => 
-                  buildEquality(
-                    ts.factory.createPropertyAccessChain(
-                      ts.factory.createIdentifier('value'),
-                      undefined,
-                      'kind'
-                    ),
-                    ts.factory.createPropertyAccessChain(
-                      ts.factory.createIdentifier(`${rootNodeName}Kind`),
-                      undefined,
-                      node.name
-                    )
-                  )
-                )
-              )
-            )
-          ])
-        )
+        buildIsNodePredicate(symbol.name, ts.getModifiers(node as ts.TypeAliasDeclaration), getAllNodeTypesDerivingFrom(symbol))
       );
 
       return;
@@ -1067,14 +1069,22 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           ts.factory.createPropertyDeclaration(
             undefined,
             parentMemberName,
+            ts.factory.createToken(ts.SyntaxKind.ExclamationToken),
+            ts.factory.createTypeReferenceNode(`${symbol.name}Parent`),
             undefined,
-            ts.factory.createUnionTypeNode([
-              ts.factory.createLiteralTypeNode(
-                ts.factory.createNull()
-              ),
-              ts.factory.createTypeReferenceNode(`${symbol.name}Parent`, undefined)
-            ]),
-            ts.factory.createNull(),
+          )
+        );
+      }
+
+      if (generateEdges) {
+        classMembers.push(
+          // public parentEdge: Edge | null = null;
+          ts.factory.createPropertyDeclaration(
+            undefined,
+            'parentEdge',
+            ts.factory.createToken(ts.SyntaxKind.ExclamationToken),
+            ts.factory.createTypeReferenceNode(`Edge`),
+            undefined
           )
         );
       }
@@ -1101,6 +1111,43 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         );
       }
 
+      if (generateEdges) {
+        classMembers.push(
+          // public *getChildren(): Iterable<XChild> { ... }
+          ts.factory.createMethodDeclaration(
+            undefined,
+            ts.factory.createToken(ts.SyntaxKind.AsteriskToken),
+            `getChildren`,
+            undefined,
+            undefined,
+            [],
+            ts.factory.createTypeReferenceNode(
+              `Iterable`,
+              [
+                ts.factory.createTupleTypeNode([
+                  ts.factory.createTypeReferenceNode(`Edge`),
+                  ts.factory.createTypeReferenceNode(`${symbol.name}Child`),
+                ])
+              ]
+            ),
+            ts.factory.createBlock(
+              membersWithAST.map(member => 
+                buildYieldChildStatements(
+                  member.type!,
+                  ts.factory.createPropertyAccessChain(
+                    ts.factory.createThis(),
+                    undefined,
+                    member.name as ts.Identifier
+                  ),
+                  [ member.name.getText() ],
+                  true
+                )!
+              )
+            )
+          )
+        )
+      }
+
       classMembers.push(
         // public *getChildNodes(): Iterable<XChild> { ... }
         ts.factory.createMethodDeclaration(
@@ -1112,22 +1159,65 @@ export default function generateCode(sourceFile: ts.SourceFile, {
           [],
           ts.factory.createTypeReferenceNode(
             `Iterable`,
-            [ ts.factory.createTypeReferenceNode(`${symbol.name}Child`, undefined) ]
+            [ ts.factory.createTypeReferenceNode(`${symbol.name}Child`) ]
           ),
           ts.factory.createBlock(
             membersWithAST.map(member => 
-              buildChildrenOfStatement(
+              buildYieldChildStatements(
                 member.type!,
                 ts.factory.createPropertyAccessChain(
                   ts.factory.createThis(),
                   undefined,
                   member.name as ts.Identifier
-                )
+                ),
+                [ member.name.getText() ],
+                false
               )!
             )
           )
         )
       )
+
+      if (generateMutators) {
+
+        for (const member of symbol.getMembers()) {
+        }
+
+        // public replace(newNode: X): void { ... }
+        classMembers.push(
+          ts.factory.createMethodDeclaration(
+            undefined,
+            undefined,
+            `replace`,
+            undefined,
+            undefined,
+            [
+              ts.factory.createParameterDeclaration(
+                undefined,
+                undefined,
+                'newNode',
+                undefined,
+                ts.factory.createTypeReferenceNode(symbol.name)
+              )
+            ],
+            ts.factory.createKeywordTypeNode( ts.SyntaxKind.VoidKeyword ),
+            ts.factory.createBlock([
+              ts.factory.createExpressionStatement(
+                ts.factory.createCallExpression(
+                  ts.factory.createIdentifier('setDeep'),
+                  undefined,
+                  [
+                    ts.factory.createPropertyAccessChain(ts.factory.createThis(), undefined, 'parentNode'),
+                    ts.factory.createPropertyAccessChain(ts.factory.createThis(), undefined, 'parentEdge'),
+                    ts.factory.createIdentifier('newNode'),
+                  ]
+                )
+              )
+            ])
+          )
+        );
+
+      }
 
       if (ts.isClassDeclaration(node)) {
         for (const member of node.members) {
@@ -1144,7 +1234,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
         //   ...
         // }
         ts.factory.createClassDeclaration(
-          undefined,
           ts.getModifiers(node),
           symbol.name,
           undefined,
@@ -1159,7 +1248,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       //   ...
       writeNode(
         ts.factory.createTypeAliasDeclaration(
-          undefined,
           exportModifier,
           `${symbol.name}Parent`,
           undefined,
@@ -1179,7 +1267,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       //   ...
       writeNode(
         ts.factory.createTypeAliasDeclaration(
-          undefined,
           exportModifier,
           `${symbol.name}Child`,
           undefined,
@@ -1197,14 +1284,12 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       // }
       writeNode(
         ts.factory.createFunctionDeclaration(
-          undefined,
           exportModifier,
           undefined,
           `is${symbol.name}`,
           undefined,
           [
             ts.factory.createParameterDeclaration(
-              undefined,
               undefined,
               undefined,
               'value',
@@ -1270,7 +1355,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
       // }
       writeNode(
         ts.factory.createFunctionDeclaration(
-          undefined,
           exportModifier,
           undefined,
           `create${symbol.name}`,
@@ -1312,19 +1396,18 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   // }
   writeNode(
     ts.factory.createFunctionDeclaration(
-      undefined,
       [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
       undefined,
       `is${rootNodeName}`,
       undefined,
       [
         ts.factory.createParameterDeclaration(
-        undefined,
-        undefined,
-        undefined,
-        'value',
-        undefined,
-        ts.factory.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword))
+          undefined,
+          undefined,
+          'value',
+          undefined,
+          ts.factory.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword)
+        )
       ],
       ts.factory.createTypePredicateNode(
         undefined,
@@ -1493,14 +1576,12 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   // }
   writeNode(
     ts.factory.createFunctionDeclaration(
-      undefined,
       [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
       undefined,
       'kindToString',
       undefined,
       [
         ts.factory.createParameterDeclaration(
-          undefined,
           undefined,
           undefined,
           'kind',
@@ -1543,7 +1624,6 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   //   ...
   writeNode(
     ts.factory.createTypeAliasDeclaration(
-      undefined,
       rootUnionModfiers,
       rootNodeName,
       undefined,
@@ -1584,24 +1664,55 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   // }
   writeNode(
     ts.factory.createEnumDeclaration(
-      undefined,
       [ ts.factory.createToken(ts.SyntaxKind.ExportKeyword) ],
       `${rootNodeName}Kind`,
       nodeTypes.map(nodeType => ts.factory.createEnumMember(nodeType.name)),
     )
   )
 
-  if (parentMemberName !== null) {
+  if (generateEdges) {
     write(`
+type Edge = Array<string | number>;
+`)
+  }
+
+  if (generateMutators) {
+    write(`
+function setDeep(root: any, key: Array<number | string>, value: any): void {
+  let i = 0;
+  for (; i < key.length-1; i++) {
+    root = root[key[i]]
+  }
+  key[i] = value
+}
+`);
+  }
+
+  if (parentMemberName !== null) {
+    if (generateEdges) {
+      write(`
+export function setParents(node: ${rootNodeName}, parentNode: ${rootNodeName} | null = null, parentEdge: Edge | null = null): void {
+  // We cast to any here because parentNode is strongly typed and not generic
+  // enough to accept arbitrary AST nodes
+  (node as any).${parentMemberName} = parentNode;
+  (node as any).parentEdge = parentEdge;
+  for (const [edge, child] of node.getChildren()) {
+    setParents(child, node, edge);
+  }
+}
+`);
+    } else {
+      write(`
 export function setParents(node: ${rootNodeName}, parentNode: ${rootNodeName} | null = null): void {
   // We cast to any here because parentNode is strongly typed and not generic
   // enough to accept arbitrary AST nodes
   (node as any).${parentMemberName} = parentNode;
-  for (const childNode of node.getChildNodes()) {
-    setParents(childNode, node);
+  for (const child of node.getChildNodes()) {
+    setParents(child, node);
   }
 }
 `);
+    }
   }
 
   return out;

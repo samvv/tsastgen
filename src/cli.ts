@@ -26,11 +26,11 @@ for (const file of files) {
   }
   const sourceFile = ts.createSourceFile(inFile, fs.readFileSync(inFile, 'utf8'), ts.ScriptTarget.Latest, true);
   const generatedCode = generateCode(sourceFile, {
-    generateVisitor: argv['with-visitor'],
-    rootNodeName: argv['with-root-node'] ?? argv['root-node'],
+    rootNodeName: argv['root-node'],
     parentMemberName: argv['with-parent-member'],
-    idMemberName: argv['with-id-member'],
+    generateVisitor: argv['with-visitor'],
     generateCoercions: argv['with-coercions'],
+    generateMutators: argv['with-mutators'],
   });
   if (outFile === null) {
     console.error(generatedCode);
@@ -39,3 +39,4 @@ for (const file of files) {
     fs.writeFileSync(outFile, generatedCode, 'utf8');
   }
 }
+
