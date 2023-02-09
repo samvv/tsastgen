@@ -226,20 +226,20 @@ export default function generateCode(sourceFile: ts.SourceFile, {
   }, 'id')
 
   const getAllNodeTypesHavingSymbolInField = memoise((nodeType: Symbol) => {
-    const result = [];
+    const result = new Set<Symbol>();
     for (const inheritedSymbol of [nodeType, ...nodeType.getAllInheritedClassesOrInterfaces()]) {
       outer: for (const otherSymbol of resolver.getAllSymbols()) {
         if (isNodeType(otherSymbol)) {
           for (const referencedSymbol of getAllASTInFieldsOfSymbol(otherSymbol)) {
             if (referencedSymbol === inheritedSymbol || referencedSymbol.getAllDerivedClassesOrInterfaces().indexOf(inheritedSymbol) !== -1) {
-              result.push(otherSymbol);
+              result.add(otherSymbol);
               continue outer;
             }
           }
         }
       }
     }
-    return result;
+    return [...result];
   }, 'id');
 
   function *expandUnionTypes(typeNode: ts.TypeNode): Generator<ts.TypeNode> {
